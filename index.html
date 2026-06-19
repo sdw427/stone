@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stone Cascade</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,sans-serif;}
+body{background:#f0ede8;display:flex;justify-content:center;padding:16px;}
+#wrap{width:370px;display:flex;flex-direction:column;gap:0;user-select:none;}
+#hud{display:flex;justify-content:space-between;align-items:center;padding:8px 4px 4px;gap:6px;}
+#hud-left{display:flex;gap:12px;align-items:baseline;}
+.stat-val{font-size:20px;font-weight:500;color:#1c1c1e;}
+.stat-lbl{font-size:11px;color:#888;}
+#streak-box{font-size:11px;color:#888;display:flex;align-items:center;gap:3px;}
+#canvas-wrap{position:relative;width:370px;height:400px;border-radius:10px;overflow:hidden;}
+canvas{display:block;}
+#env-bar{display:flex;justify-content:space-between;align-items:center;padding:5px 2px 2px;font-size:11px;color:#aaa;}
+#msg-row{font-size:12px;color:#666;text-align:center;min-height:18px;padding:4px 0 6px;}
+#btns{display:flex;gap:8px;padding:0 0 8px;}
+button{font-size:12px;padding:5px 10px;border:0.5px solid #bbb;border-radius:8px;background:transparent;color:#555;cursor:pointer;}
+#rescue-btn{flex:1;}
+#rescue-btn:disabled{opacity:0.35;cursor:default;}
+@media(prefers-color-scheme:dark){
+  body{background:#1c1c1e;}
+  .stat-val{color:#fff;}
+  .stat-lbl,.stat-val+.stat-lbl{color:#888;}
+  button{color:#aaa;border-color:#444;}
+  #msg-row{color:#888;}
+  #env-bar{color:#666;}
+}
+</style>
+</head>
+<body>
+<div id="wrap">
+<div id="hud">
+  <div id="hud-left">
+    <div><span class="stat-val" id="h-score">0</span> <span class="stat-lbl">pts</span></div>
+    <div><span class="stat-val" id="h-turn">1</span> <span class="stat-lbl">turn</span></div>
+    <div id="streak-box"><span id="streak-fire"></span><span id="h-streak">0 streak</span></div>
+  </div>
+  <div style="display:flex;gap:6px;">
+    <button id="ctrl-btn" onclick="toggleControl()">Switch: Shuffleboard</button>
+    <button onclick="restartGame()">New</button>
+  </div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="c" width="370" height="400"></canvas>
+</div>
+
+<div id="env-bar">
+  <span id="env-wind">Wind: none</span>
+  <span id="env-friction">Friction: normal</span>
+  <span id="env-dist">Zone 1</span>
+</div>
+<div id="msg-row" id="msg"></div>
+<div id="btns">
+  <button id="rescue-btn" disabled onclick="useRescue()">Rescue shot (costs 1 pt) — pull stones back</button>
+</div>
+</div>
+
+<script>
+const C = document.getElementById('c');
+const ctx = C.getContext('2d');
+const W = 370, H = 400;
+const SR = 18;
+
+let G = {};
+let controlMode = 'slingshot';
+
+function toggleControl() {
+  controlMode = controlMode === 'slingshot' ? 'shuffleboard' : 'slingshot';
+  document.getElementById('ctrl-btn').textContent = 'Switch: ' + (controlMode === 'slingshot' ? 'Shuffleboard' : 'Slingshot');
+  setMsg(controlMode === 'slingshot' ? 'Drag AWAY from stone, release to fire' : 'Tap stone, swipe FORWARD to shove');
+}
+
+function dark() {
+  return window.matchMedia('(prefers-color-scheme:dark)').matches;
+}
+
+const STONE_COLS = [
+  { base:'#7F77DD', hi:'#AFA9EC', dk:'#534AB7' },
+  { base:'#1D9E75', hi:'#5DCAA5', dk:'#0F6E56' },
+  { base:'#D85A30', hi:'#F0997B', dk:'#993C1D' },
+];
+
+function initGame() {
+  const sp = 52;
+  G = {
+    stones: [
+      { id:0, wx:0, wy:-sp*0.55, vx:0, vy:0 },
+      { id:1, wx:-sp, wy:sp*0.45, vx:0, vy:0 },
+      { id:2, wx:sp, wy:sp*0.45, vx:0, vy:0 },
+    ],
+    cam: { x:0, y:0 },
+    phase: 'push',
+    score: 0,
+    turn: 1,
+    streak: 0,
+    lastTouched: null,
+    animating: false,
+    wind: { x:0, y:0, str:0 },
+    friction: 0.977,
+    particles: [],
+    obstacles: [],
+    floatTexts: [],
+    rescueAvail: false,
+  };
+  slingStoneSel=null; slingStart=null; slingCur=null;
+  shuffStone=null; shuffStart=null;
+  updateHUD(); updateEnv(); genObstacles();
+}
+
+function distFromOrigin() {
+  const cx = G.stones.reduce((s,st)=>s+st.wx,0)/3;
+  const cy = G.stones.reduce((s,st)=>s+st.wy,0)/3;
+  return Math.hypot(cx, cy);
+}
+
+function zone() { return Math.floor(distFromOrigin()/120)+1; }
+
+function updateEnv() {
+  const d = distFromOrigin();
+  G.friction = Math.max(0.91, 0.983 - d*0.00035);
+  const ws = Math.min(d*0.013, 2.8);
+  const ang = (G.turn*1.7) % (Math.PI*2);
+  G.wind = { x:Math.cos(ang)*ws, y:Math.sin(ang)*ws*0.5, str:ws };
+  const wl = ws<0.4?'none':ws<1.0?'light':ws<1.8?'moderate':'strong';
+  document.getElementById('env-wind').textContent = 'Wind: '+wl;
+  const fl = G.friction>0.975?'normal':G.friction>0.96?'rough':'very rough';
+  document.getElementById('env-friction').textContent = 'Friction: '+fl;
+  document.getElementById('env-dist').textContent = 'Zone '+zone();
+}
+
+function genObstacles() {
+  const z = zone();
+  if (z < 2) return;
+  const cx = G.stones.reduce((s,st)=>s+st.wx,0)/3;
+  const cy = G.stones.reduce((s,st)=>s+st.wy,0)/3;
+  const count = Math.min(z-1, 5);
+  for (let i=0;i<count;i++) {
+    const ang = Math.random()*Math.PI*2;
+    const r = 80 + Math.random()*90;
+    const moving = z>=4 && Math.random()<(z-3)*0.25;
+    G.obstacles.push({
+      wx: cx+Math.cos(ang)*r,
+      wy: cy+Math.sin(ang)*r,
+      r: 10+Math.random()*8,
+      moving,
+      vx: moving?(Math.random()-0.5)*0.6:0,
+      vy: moving?(Math.random()-0.5)*0.6:0,
+      phase: Math.random()*Math.PI*2,
+    });
+  }
+}
+
+function updateHUD() {
+  document.getElementById('h-score').textContent = G.score;
+  document.getElementById('h-turn').textContent = G.turn;
+  document.getElementById('h-streak').textContent = G.streak+' streak';
+  document.getElementById('streak-fire').textContent = G.streak>=3 ? '★ ' : '';
+  document.getElementById('rescue-btn').disabled = !(G.rescueAvail && G.score>0);
+}
+
+function setMsg(t) { document.getElementById('msg-row').textContent = t; }
+
+function wx2sx(wx) { return W/2+(wx-G.cam.x); }
+function wy2sy(wy) { return H/2+(wy-G.cam.y); }
+
+function smoothCam() {
+  const tx = G.stones.reduce((s,st)=>s+st.wx,0)/3;
+  const ty = G.stones.reduce((s,st)=>s+st.wy,0)/3;
+  G.cam.x += (tx-G.cam.x)*0.06;
+  G.cam.y += (ty-G.cam.y)*0.06;
+}
+
+function stoneAt(sx, sy) {
+  for (const s of G.stones) {
+    const dx=wx2sx(s.wx)-sx, dy=wy2sy(s.wy)-sy;
+    if (Math.hypot(dx,dy)<SR+12) return s;
+  }
+  return null;
+}
+
+function resolveCollision(a, b) {
+  const dx=b.wx-a.wx, dy=b.wy-a.wy, dist=Math.hypot(dx,dy);
+  if (dist<SR*2&&dist>0.01) {
+    const nx=dx/dist, ny=dy/dist, ov=SR*2-dist;
+    a.wx-=nx*ov/2; a.wy-=ny*ov/2;
+    b.wx+=nx*ov/2; b.wy+=ny*ov/2;
+    const rv=a.vx-b.vx, ru=a.vy-b.vy, dot=rv*nx+ru*ny;
+    if (dot>0){const imp=dot*0.88;a.vx-=imp*nx;a.vy-=imp*ny;b.vx+=imp*nx;b.vy+=imp*ny;}
+  }
+}
+
+function resolveObstacle(s, o) {
+  const dx=s.wx-o.wx, dy=s.wy-o.wy, dist=Math.hypot(dx,dy);
+  const minD=SR+o.r;
+  if (dist<minD&&dist>0.01){
+    const nx=dx/dist, ny=dy/dist;
+    s.wx=o.wx+nx*minD; s.wy=o.wy+ny*minD;
+    const dot=s.vx*nx+s.vy*ny;
+    if(dot<0){s.vx-=2*dot*nx*0.7;s.vy-=2*dot*ny*0.7;}
+  }
+}
+
+function stepPhysics() {
+  let moving=false;
+  for (const s of G.stones){
+    s.vx+=G.wind.x*0.04; s.vy+=G.wind.y*0.04;
+    s.vx*=G.friction; s.vy*=G.friction;
+    s.wx+=s.vx; s.wy+=s.vy;
+    if(Math.abs(s.vx)>0.04||Math.abs(s.vy)>0.04) moving=true;
+  }
+  for(let i=0;i<G.stones.length;i++)
+    for(let j=i+1;j<G.stones.length;j++)
+      resolveCollision(G.stones[i],G.stones[j]);
+  for(const o of G.obstacles){
+    if(o.moving){o.phase+=0.02;o.vx=Math.cos(o.phase)*0.7;o.vy=Math.sin(o.phase*0.7)*0.5;o.wx+=o.vx;o.wy+=o.vy;}
+    for(const s of G.stones) resolveObstacle(s,o);
+  }
+  for(const p of G.particles){p.x+=p.vx;p.y+=p.vy;p.life-=0.055;p.vx*=0.95;p.vy*=0.95;}
+  G.particles=G.particles.filter(p=>p.life>0);
+  for(const ft of G.floatTexts){ft.y-=0.5;ft.life-=0.022;}
+  G.floatTexts=G.floatTexts.filter(f=>f.life>0);
+  return moving;
+}
+
+function spawnParticles(wx,wy,col){
+  const sx=wx2sx(wx),sy=wy2sy(wy);
+  for(let i=0;i<8;i++){const a=Math.random()*Math.PI*2,sp=0.8+Math.random()*2.5;G.particles.push({x:sx,y:sy,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:1,col});}
+}
+
+function spawnFloatText(wx,wy,text,col){
+  G.floatTexts.push({x:wx2sx(wx),y:wy2sy(wy),text,col,life:1});
+}
+
+function stonePassedThrough(shot,gp1,gp2){
+  const mx=(gp1.wx+gp2.wx)/2,my=(gp1.wy+gp2.wy)/2;
+  const gapR=Math.hypot(gp1.wx-gp2.wx,gp1.wy-gp2.wy)/2;
+  return Math.hypot(shot.wx-mx,shot.wy-my)<gapR-SR*0.3;
+}
+
+function runAnimation(phase, shotId){
+  G.animating=true;
+  const goalStones=G.stones.filter(s=>s.id!==shotId);
+  let scored=false,ticks=0;
+  function tick(){
+    smoothCam();
+    const moving=stepPhysics();
+    if(phase==='aim'&&!scored){
+      const s=G.stones.find(s=>s.id===shotId);
+      if(stonePassedThrough(s,goalStones[0],goalStones[1])){
+        scored=true;
+        G.streak++;
+        const bonus=G.streak>=3?1:0;
+        G.score+=1+bonus;
+        spawnParticles(s.wx,s.wy,'#7F77DD');
+        spawnFloatText(s.wx,s.wy-30,bonus?'+2 ★':'+1','#534AB7');
+        setMsg(bonus?'Streak x'+G.streak+'! Bonus point earned!':'Scored!');
+        updateHUD();
+      }
+    }
+    draw();
+    ticks++;
+    if(moving&&ticks<400){requestAnimationFrame(tick);return;}
+    G.animating=false;
+    if(phase==='push'){
+      G.phase='aim'; updateEnv(); genObstacles();
+      setMsg('Flick a DIFFERENT stone through the goal posts');
+    } else {
+      if(!scored){G.streak=0;setMsg('Missed — push a stone to begin next turn');}
+      else setMsg('Push a stone to cascade for next turn');
+      G.lastTouched=shotId; G.turn++;
+      G.phase='push'; G.rescueAvail=(G.score>0); updateHUD();
+    }
+    updateHUD(); draw();
+  }
+  requestAnimationFrame(tick);
+}
+
+function fireStone(stone,vx,vy){
+  stone.vx=vx; stone.vy=vy;
+  if(G.phase==='push'){G.lastTouched=stone.id;G.phase='wait';runAnimation('push',stone.id);}
+  else{G.phase='wait';runAnimation('aim',stone.id);}
+}
+
+let slingStoneSel=null,slingStart=null,slingCur=null;
+let shuffStone=null,shuffStart=null;
+
+C.addEventListener('pointerdown',e=>{
+  if(G.animating) return;
+  const r=C.getBoundingClientRect();
+  const sx=(e.clientX-r.left)*(W/r.width),sy=(e.clientY-r.top)*(H/r.height);
+  const s=stoneAt(sx,sy);
+  if(!s) return;
+  if(G.phase==='aim'&&s.id===G.lastTouched){setMsg('Pick a DIFFERENT stone!');return;}
+  if(controlMode==='slingshot'){slingStoneSel=s;slingStart={x:sx,y:sy};slingCur={x:sx,y:sy};}
+  else{shuffStone=s;shuffStart={x:sx,y:sy};slingCur={x:sx,y:sy};}
+});
+
+C.addEventListener('pointermove',e=>{
+  if(G.animating||(!slingStoneSel&&!shuffStone)) return;
+  const r=C.getBoundingClientRect();
+  slingCur={(e.clientX-r.left)*(W/r.width)+0};
+  slingCur={x:(e.clientX-r.left)*(W/r.width),y:(e.clientY-r.top)*(H/r.height)};
+  draw();
+});
+
+C.addEventListener('pointerup',e=>{
+  if(G.animating) return;
+  const r=C.getBoundingClientRect();
+  const sx=(e.clientX-r.left)*(W/r.width),sy=(e.clientY-r.top)*(H/r.height);
+  if(controlMode==='slingshot'&&slingStoneSel&&slingStart){
+    const dx=slingStart.x-sx,dy=slingStart.y-sy,len=Math.hypot(dx,dy);
+    if(len>5){fireStone(slingStoneSel,(dx/len)*Math.min(len*0.2,13),(dy/len)*Math.min(len*0.2,13));}
+    slingStoneSel=null;slingStart=null;slingCur=null;
+  } else if(controlMode==='shuffleboard'&&shuffStone&&shuffStart){
+    const dx=sx-shuffStart.x,dy=sy-shuffStart.y,len=Math.hypot(dx,dy);
+    if(len>5){fireStone(shuffStone,(dx/len)*Math.min(len*0.18,13),(dy/len)*Math.min(len*0.18,13));}
+    shuffStone=null;shuffStart=null;slingCur=null;
+  }
+});
+
+function useRescue(){
+  if(!G.rescueAvail||G.score<1) return;
+  G.score--;
+  G.rescueAvail=false;
+  const cx=G.stones.reduce((s,st)=>s+st.wx,0)/3;
+  const cy=G.stones.reduce((s,st)=>s+st.wy,0)/3;
+  for(const s of G.stones){s.wx=cx+(s.wx-cx)*0.4;s.wy=cy+(s.wy-cy)*0.4;s.vx=0;s.vy=0;}
+  G.cam.x=G.stones.reduce((s,st)=>s+st.wx,0)/3;
+  G.cam.y=G.stones.reduce((s,st)=>s+st.wy,0)/3;
+  G.obstacles=[];
+  updateEnv();updateHUD();
+  setMsg('Rescue used — stones pulled closer');
+  draw();
+}
+
+function drawGrid(){
+  const gs=60;
+  const offx=((G.cam.x%gs)+gs)%gs;
+  const offy=((G.cam.y%gs)+gs)%gs;
+  ctx.strokeStyle=dark()?'rgba(255,255,255,0.05)':'rgba(0,0,0,0.06)';
+  ctx.lineWidth=0.5;
+  for(let x=W%gs-offx-gs;x<W+gs;x+=gs){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  for(let y=H%gs-offy-gs;y<H+gs;y+=gs){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+}
+
+function drawOriginMarker(){
+  const sx=wx2sx(0),sy=wy2sy(0);
+  if(sx<-20||sx>W+20||sy<-20||sy>H+20) return;
+  ctx.save();
+  ctx.strokeStyle=dark()?'rgba(255,255,255,0.25)':'rgba(0,0,0,0.2)';
+  ctx.lineWidth=1;
+  ctx.beginPath();ctx.arc(sx,sy,5,0,Math.PI*2);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(sx-10,sy);ctx.lineTo(sx+10,sy);ctx.moveTo(sx,sy-10);ctx.lineTo(sx,sy+10);ctx.stroke();
+  ctx.restore();
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle=dark()?'#1c1c1e':'#f0ede8';
+  ctx.fillRect(0,0,W,H);
+  drawGrid();
+  drawOriginMarker();
+
+  for(const o of G.obstacles){
+    const sx=wx2sx(o.wx),sy=wy2sy(o.wy);
+    ctx.save();
+    ctx.beginPath();ctx.arc(sx,sy,o.r,0,Math.PI*2);
+    ctx.fillStyle=o.moving?(dark()?'#633806':'#EF9F27'):(dark()?'#3C3489':'#AFA9EC');
+    ctx.fill();
+    if(o.moving){ctx.strokeStyle=dark()?'#EF9F27':'#BA7517';ctx.lineWidth=1.5;ctx.stroke();}
+    ctx.restore();
+  }
+
+  const aimPhase=(G.phase==='aim');
+  if(aimPhase){
+    const gp=G.stones.filter(s=>s.id!==G.lastTouched);
+    if(gp.length===2){
+      ctx.save();ctx.setLineDash([5,5]);
+      ctx.strokeStyle=dark()?'rgba(255,255,255,0.22)':'rgba(0,0,0,0.15)';
+      ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(wx2sx(gp[0].wx),wy2sy(gp[0].wy));ctx.lineTo(wx2sx(gp[1].wx),wy2sy(gp[1].wy));ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  for(const p of G.particles){
+    ctx.save();ctx.globalAlpha=p.life;ctx.fillStyle=p.col;
+    ctx.beginPath();ctx.arc(p.x,p.y,4*p.life,0,Math.PI*2);ctx.fill();ctx.restore();
+  }
+  for(const ft of G.floatTexts){
+    ctx.save();ctx.globalAlpha=ft.life;ctx.fillStyle=ft.col;
+    ctx.font='500 18px system-ui';ctx.textAlign='center';ctx.fillText(ft.text,ft.x,ft.y);ctx.restore();
+  }
+
+  for(const s of G.stones){
+    const sx=wx2sx(s.wx),sy=wy2sy(s.wy);
+    const isLast=s.id===G.lastTouched;
+    const isSel=(slingStoneSel&&s.id===slingStoneSel.id)||(shuffStone&&s.id===shuffStone.id);
+    const col=isSel?STONE_COLS[s.id].hi:(dark()?STONE_COLS[s.id].dk:STONE_COLS[s.id].base);
+    ctx.save();
+    ctx.beginPath();ctx.arc(sx,sy,SR,0,Math.PI*2);ctx.fillStyle=col;ctx.fill();
+    if(isLast){ctx.setLineDash([3,3]);ctx.strokeStyle=dark()?'rgba(255,255,255,0.35)':'rgba(0,0,0,0.25)';ctx.lineWidth=2;ctx.stroke();}
+    if(G.phase==='aim'&&!isLast&&!G.animating){ctx.setLineDash([]);ctx.strokeStyle=dark()?'rgba(255,255,255,0.55)':'rgba(0,0,0,0.4)';ctx.lineWidth=2;ctx.beginPath();ctx.arc(sx,sy,SR+6,0,Math.PI*2);ctx.stroke();}
+    ctx.fillStyle='rgba(255,255,255,0.85)';ctx.font='500 11px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(String.fromCharCode(65+s.id),sx,sy);
+    ctx.restore();
+  }
+
+  if(controlMode==='slingshot'&&slingStoneSel&&slingStart&&slingCur){
+    const dx=slingStart.x-slingCur.x,dy=slingStart.y-slingCur.y,len=Math.hypot(dx,dy);
+    if(len>4){
+      const pw=Math.min(len*0.2,13),nx=dx/len,ny=dy/len;
+      const sx=wx2sx(slingStoneSel.wx),sy=wy2sy(slingStoneSel.wy);
+      ctx.save();ctx.strokeStyle=dark()?'rgba(255,255,255,0.5)':'rgba(0,0,0,0.4)';ctx.lineWidth=1.5;ctx.setLineDash([4,4]);
+      ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(sx+nx*pw*6,sy+ny*pw*6);ctx.stroke();
+      ctx.fillStyle=dark()?'rgba(255,255,255,0.3)':'rgba(0,0,0,0.15)';
+      ctx.beginPath();ctx.arc(slingCur.x,slingCur.y,7,0,Math.PI*2);ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  if(controlMode==='shuffleboard'&&shuffStone&&shuffStart&&slingCur){
+    const dx=slingCur.x-shuffStart.x,dy=slingCur.y-shuffStart.y,len=Math.hypot(dx,dy);
+    if(len>4){
+      const pw=Math.min(len*0.18,13),nx=dx/len,ny=dy/len;
+      const sx=wx2sx(shuffStone.wx),sy=wy2sy(shuffStone.wy);
+      ctx.save();ctx.strokeStyle=dark()?'rgba(255,255,255,0.55)':'rgba(0,0,0,0.45)';ctx.lineWidth=2;ctx.setLineDash([]);
+      ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(sx+nx*pw*6,sy+ny*pw*6);
+      ctx.moveTo(sx+nx*pw*6-ny*5,sy+ny*pw*6+nx*5);ctx.lineTo(sx+nx*pw*6,sy+ny*pw*6);ctx.lineTo(sx+nx*pw*6+ny*5,sy+ny*pw*6-nx*5);
+      ctx.stroke();ctx.restore();
+    }
+  }
+
+  if(G.wind.str>0.35&&!G.animating){
+    const ang=Math.atan2(G.wind.y,G.wind.x);
+    ctx.save();ctx.translate(W-24,24);ctx.rotate(ang);
+    ctx.strokeStyle=dark()?'rgba(255,255,255,0.4)':'rgba(0,0,0,0.3)';ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.moveTo(-9,0);ctx.lineTo(9,0);ctx.moveTo(5,-4);ctx.lineTo(9,0);ctx.lineTo(5,4);ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function restartGame(){
+  initGame();
+  setMsg(controlMode==='slingshot'?'Drag AWAY from stone, release to fire':'Tap stone, then swipe FORWARD to shove');
+  draw();
+}
+
+restartGame();
+</script>
+</body>
+</html>
