@@ -87,6 +87,7 @@ let G = {};
 let shuffStone=null, shuffStart=null, dragCur=null;
 
 function dark(){ return window.matchMedia('(prefers-color-scheme:dark)').matches; }
+window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change', ()=>{ terrainCacheFrame = -1; });
 
 const STONE_COLS = [
   { base:'#7F77DD', hi:'#AFA9EC' },
@@ -211,6 +212,7 @@ function initGame(){
     buoy: null,
   };
   shuffStone=null; shuffStart=null; dragCur=null;
+  terrainCacheFrame = -1;
   document.getElementById('overlay').classList.remove('show');
   updateHUD();
   setMsg('Tap one stone and swipe to break the triangle');
@@ -462,17 +464,29 @@ C.addEventListener('pointerup', e=>{
   shuffStone=null; shuffStart=null; dragCur=null;
 });
 
+let terrainCacheCanvas = null, terrainCacheCtx = null, terrainCacheFrame = -1;
+let frameCounter = 0;
+
 function drawTerrain(){
-  const cell = 14;
-  for (let sx=0; sx<W; sx+=cell){
-    for (let sy=0; sy<H; sy+=cell){
-      const wx = sx2wx(sx+cell/2), wy = sy2wy(sy+cell/2);
-      const t = terrainValueAt(wx, wy);
-      const rgb = dark() ? terrainColorDark(t) : terrainColor(t);
-      ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
-      ctx.fillRect(sx, sy, cell+1, cell+1);
-    }
+  if (!terrainCacheCanvas){
+    terrainCacheCanvas = document.createElement('canvas');
+    terrainCacheCanvas.width = W; terrainCacheCanvas.height = H;
+    terrainCacheCtx = terrainCacheCanvas.getContext('2d');
   }
+  if (frameCounter - terrainCacheFrame >= 3 || terrainCacheFrame === -1){
+    const cell = 28;
+    for (let sx=0; sx<W; sx+=cell){
+      for (let sy=0; sy<H; sy+=cell){
+        const wx = sx2wx(sx+cell/2), wy = sy2wy(sy+cell/2);
+        const t = terrainValueAt(wx, wy);
+        const rgb = dark() ? terrainColorDark(t) : terrainColor(t);
+        terrainCacheCtx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+        terrainCacheCtx.fillRect(sx, sy, cell+1, cell+1);
+      }
+    }
+    terrainCacheFrame = frameCounter;
+  }
+  ctx.drawImage(terrainCacheCanvas, 0, 0);
 }
 
 function drawGrid(){
@@ -486,6 +500,7 @@ function drawGrid(){
 }
 
 function draw(){
+  frameCounter++;
   ctx.clearRect(0,0,W,H);
   drawTerrain();
   drawGrid();
