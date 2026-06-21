@@ -6,6 +6,7 @@
 <title>Stone Cascade</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,sans-serif;}
+html,body{touch-action:none;overflow:hidden;}
 body{background:#f0ede8;display:flex;justify-content:center;padding:16px;}
 #wrap{width:370px;display:flex;flex-direction:column;gap:0;user-select:none;}
 #hud{display:flex;justify-content:space-between;align-items:center;padding:8px 4px 6px;}
@@ -13,7 +14,7 @@ body{background:#f0ede8;display:flex;justify-content:center;padding:16px;}
 .stat-val{font-size:22px;font-weight:600;color:#1c1c1e;line-height:1;}
 .stat-lbl{font-size:11px;color:#888;margin-top:2px;}
 #canvas-wrap{position:relative;width:370px;height:400px;border-radius:10px;overflow:hidden;background:#e8e4dc;}
-canvas{display:block;}
+canvas{display:block;touch-action:none;}
 #msg-row{font-size:13px;color:#666;text-align:center;min-height:18px;padding:8px 0 6px;}
 button{font-size:13px;padding:7px 14px;border:0.5px solid #bbb;border-radius:8px;background:transparent;color:#555;cursor:pointer;}
 #new-btn{display:block;margin:0 auto;}
@@ -59,16 +60,23 @@ const C = document.getElementById('c');
 const ctx = C.getContext('2d');
 const W = 370, H = 400;
 const SR = 18;
-const BASE_FRICTION = 0.978;
-const ICE_FRICTION = 0.988;
-const GRAVEL_FRICTION = 0.945;
+const BASE_FRICTION = 0.945;
+const ICE_FRICTION = 0.985;
+const GRAVEL_FRICTION = 0.885;
 const MAX_POWER = 11;
-const CASCADE_POWER_MULT = 1.4;
+const CASCADE_POWER_MULT = 1.0;
 const BASE_ZOOM = 1;
 const MIN_ZOOM = 0.35;
 const VIEW_MARGIN = 70;
 const TERRAIN_SCALE = 220;
-const TERRAIN_SEED_COUNT = 60;
+const TERRAIN_SEED_COUNT = 80;
+const TERRAIN_MAX_DIST = 650;
+const DIFFICULTY_RAMP_PER_TURN = 0.04;
+const MIN_RADIUS_MULT = 0.55;
+const MIN_POWER_MULT = 0.7;
+const POWER_RAMP_PER_TURN = 0.02;
+const TERRAIN_GROWTH_PER_TURN = 0.05;
+const MAX_TERRAIN_INTENSITY_MULT = 1.8;
 
 let G = {};
 let shuffStone=null, shuffStart=null, dragCur=null;
@@ -95,15 +103,20 @@ function makeTerrain(seedVal){
   const SAFE_R = 130;
   for (let i=0;i<TERRAIN_SEED_COUNT;i++){
     const ang = rand()*Math.PI*2;
-    const dist = SAFE_R + rand()*rand()*2200;
+    const dist = SAFE_R + rand()*rand()*TERRAIN_MAX_DIST;
     seeds.push({
       wx: Math.cos(ang)*dist,
       wy: Math.sin(ang)*dist,
-      r: 60 + rand()*140,
+      r: 45 + rand()*75,
       val: rand()*2 - 1,
     });
   }
   return seeds;
+}
+
+function terrainIntensityMult(){
+  const turn = (G && G.turn) ? G.turn : 1;
+  return Math.min(MAX_TERRAIN_INTENSITY_MULT, 1 + (turn-1) * TERRAIN_GROWTH_PER_TURN);
 }
 
 function terrainValueAt(wx, wy){
@@ -115,6 +128,7 @@ function terrainValueAt(wx, wy){
     weightSum += w;
   }
   let raw = weightSum < 0.01 ? 0 : total;
+  raw *= terrainIntensityMult();
   raw = Math.max(-1, Math.min(1, raw));
   const distFromOrigin = Math.hypot(wx, wy);
   const SAFE_R = 130, FADE_R = 230;
@@ -259,13 +273,14 @@ function resolveCollision(a,b){
 
 function stepPhysics(){
   let moving=false;
+  const STOP_THRESH = 0.2;
   for (const s of G.stones){
     const f = frictionAtSigned(s.wx, s.wy);
     s.vx *= f; s.vy *= f;
-    if (Math.abs(s.vx) < 0.03) s.vx = 0;
-    if (Math.abs(s.vy) < 0.03) s.vy = 0;
+    if (Math.abs(s.vx) < STOP_THRESH) s.vx = 0;
+    if (Math.abs(s.vy) < STOP_THRESH) s.vy = 0;
     s.wx += s.vx; s.wy += s.vy;
-    if (Math.abs(s.vx) > 0.03 || Math.abs(s.vy) > 0.03) moving = true;
+    if (Math.abs(s.vx) > STOP_THRESH || Math.abs(s.vy) > STOP_THRESH) moving = true;
   }
   for (let i=0;i<G.stones.length;i++)
     for (let j=i+1;j<G.stones.length;j++)
@@ -290,11 +305,22 @@ function spawnFloatText(wx,wy,text,col){
   G.floatTexts.push({x:wx2sx(wx), y:wy2sy(wy), text, col, life:1});
 }
 
+function difficultyRadiusMult(){
+  const turn = G.turn || 1;
+  return Math.max(MIN_RADIUS_MULT, 1 - (turn-1) * DIFFICULTY_RAMP_PER_TURN);
+}
+
+function visualStoneGrowth(){
+  const rm = difficultyRadiusMult();
+  const t = (1 - rm) / (1 - MIN_RADIUS_MULT);
+  return 1 + t * 0.35;
+}
+
 function stonePassedThrough(shot, gp1, gp2){
   const mx=(gp1.wx+gp2.wx)/2, my=(gp1.wy+gp2.wy)/2;
   const fullGap = Math.hypot(gp1.wx-gp2.wx, gp1.wy-gp2.wy);
   const postOpening = Math.max(fullGap - SR*2, SR*0.6);
-  const scoreRadius = Math.min(postOpening/2, fullGap/2 - SR*0.5);
+  const scoreRadius = Math.min(postOpening/2, fullGap/2 - SR*0.5) * difficultyRadiusMult();
   return Math.hypot(shot.wx-mx, shot.wy-my) < scoreRadius;
 }
 
@@ -324,7 +350,7 @@ function runAnimation(phase, shotId){
         G.score++;
         spawnParticles(s.wx, s.wy, '#7F77DD');
         spawnFloatText(s.wx, s.wy-30, '+1', '#534AB7');
-        setMsg('Scored!');
+        setMsg('Scored! Getting tighter…');
         updateHUD();
       }
     }
@@ -334,7 +360,7 @@ function runAnimation(phase, shotId){
     G.animating = false;
     if (phase==='cascade'){
       G.phase = 'goal';
-      setMsg('Flick a DIFFERENT stone through the goal posts');
+      setMsg('Pick a stone — each lights up its own goal line');
       draw();
     } else {
       if (!scored){
@@ -342,7 +368,7 @@ function runAnimation(phase, shotId){
         draw();
         return;
       }
-      setMsg('Push a different stone through the next goal');
+      setMsg('Pick a stone, then shoot through its goal line');
       G.lastTouched = shotId;
       G.turn++;
       G.phase = 'goal';
@@ -377,10 +403,16 @@ C.addEventListener('pointerdown', e=>{
 
 C.addEventListener('pointermove', e=>{
   if (!shuffStone) return;
+  e.preventDefault();
   const r = C.getBoundingClientRect();
   dragCur = {x:(e.clientX-r.left)*(W/r.width), y:(e.clientY-r.top)*(H/r.height)};
   draw();
 });
+
+function difficultyPowerMult(){
+  const turn = G.turn || 1;
+  return Math.max(MIN_POWER_MULT, 1 - (turn-1) * POWER_RAMP_PER_TURN);
+}
 
 C.addEventListener('pointerup', e=>{
   if (!shuffStone || !shuffStart) return;
@@ -389,7 +421,7 @@ C.addEventListener('pointerup', e=>{
   const dx=sx-shuffStart.x, dy=sy-shuffStart.y, len=Math.hypot(dx,dy);
   if (len > 5){
     const mult = G.phase==='cascade' ? CASCADE_POWER_MULT : 1;
-    const power = Math.min(len*0.12, MAX_POWER) * mult;
+    const power = Math.min(len*0.12, MAX_POWER) * mult * difficultyPowerMult();
     fireStone(shuffStone, (dx/len)*power, (dy/len)*power);
   }
   shuffStone=null; shuffStart=null; dragCur=null;
@@ -424,12 +456,16 @@ function draw(){
   drawGrid();
 
   if (G.phase==='goal'){
-    const gp = G.stones.filter(s=>s.id!==G.lastTouched);
-    if (gp.length===2){
+    const candidates = G.stones.filter(s => s.id !== G.lastTouched);
+    for (const shootStone of candidates){
+      const gp = G.stones.filter(s => s.id !== shootStone.id);
+      const isActive = shuffStone && shuffStone.id === shootStone.id;
       ctx.save();
       ctx.setLineDash([5,5]);
-      ctx.strokeStyle = dark() ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.15)';
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = isActive
+        ? (dark() ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.4)')
+        : (dark() ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.12)');
+      ctx.lineWidth = isActive ? 2 : 1.5;
       ctx.beginPath();
       ctx.moveTo(wx2sx(gp[0].wx), wy2sy(gp[0].wy));
       ctx.lineTo(wx2sx(gp[1].wx), wy2sy(gp[1].wy));
@@ -450,7 +486,7 @@ function draw(){
     ctx.restore();
   }
 
-  const r = SR * G.cam.zoom;
+  const r = SR * G.cam.zoom * visualStoneGrowth();
   for (const s of G.stones){
     const sx = wx2sx(s.wx), sy = wy2sy(s.wy);
     const isLast = s.id === G.lastTouched;
