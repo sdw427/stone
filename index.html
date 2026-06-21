@@ -88,7 +88,7 @@ const TERRAIN_SCALE = 220;
 const TERRAIN_SEED_COUNT = 80;
 const TERRAIN_MAX_DIST = 650;
 const TERRAIN_REANCHOR_DIST = 320;
-const DIFFICULTY_RAMP_PER_TURN = 0.02;
+const DIFFICULTY_RAMP_PER_TURN = 0.0321;
 const MIN_RADIUS_MULT = 0.55;
 const MIN_POWER_MULT = 0.7;
 const POWER_RAMP_PER_TURN = 0.02;
@@ -349,12 +349,12 @@ function difficultyRadiusMult(){
   return Math.max(MIN_RADIUS_MULT, 1 - (turn-1) * DIFFICULTY_RAMP_PER_TURN);
 }
 
-const MAX_VISUAL_GROWTH = 0.15;
+const MAX_VISUAL_GROWTH = 0.22;
 
 function visualStoneGrowth(){
   const rm = difficultyRadiusMult();
   const t = (1 - rm) / (1 - MIN_RADIUS_MULT);
-  return 1 + t * MAX_VISUAL_GROWTH;
+  return 1 + Math.sqrt(t) * MAX_VISUAL_GROWTH;
 }
 
 function stonePassedThrough(shot, gp1, gp2){
@@ -395,7 +395,6 @@ function acceptRescue(){
   G.score = Math.max(0, G.score - cost);
   G.rescuesUsed++;
   document.getElementById('rescue-overlay').classList.remove('show');
-  G.difficultyTurn++;
   G.lastTouched = G.pendingMissShotId;
   G.pendingMissShotId = null;
   G.turn++;
