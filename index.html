@@ -60,11 +60,14 @@ const C = document.getElementById('c');
 const ctx = C.getContext('2d');
 const W = 370, H = 400;
 const SR = 18;
-const BASE_FRICTION = 0.945;
-const ICE_FRICTION = 0.96;
-const GRAVEL_FRICTION = 0.925;
+const BASE_FRICTION = 0.955;
+const ICE_FRICTION = 0.97;
+const GRAVEL_FRICTION = 0.935;
 const MAX_POWER = 11;
 const CASCADE_POWER_MULT = 1.0;
+const VELOCITY_WINDOW_MS = 110;
+const VELOCITY_TO_POWER = 4.8;
+const MIN_RELEASE_VELOCITY = 0.06;
 const BASE_ZOOM = 1;
 const MIN_ZOOM = 0.35;
 const VIEW_MARGIN = 70;
@@ -78,7 +81,7 @@ const MIN_POWER_MULT = 0.7;
 const POWER_RAMP_PER_TURN = 0.02;
 const TERRAIN_GROWTH_PER_TURN = 0.05;
 const MAX_TERRAIN_INTENSITY_MULT = 1.8;
-const BUOY_ELIGIBLE_TURN = 15;
+const BUOY_ELIGIBLE_TURN = 6;
 const BUOY_SPAWN_CHANCE = 0.35;
 const BUOY_MIN_DIST_FACTOR = 0.4;
 const BUOY_MAX_DIST_FACTOR = 0.8;
@@ -87,7 +90,7 @@ const BUOY_TAP_PADDING = 14;
 const BUOY_LIFESPAN_MS = 4000;
 
 let G = {};
-let shuffStone=null, shuffStart=null, dragCur=null;
+let shuffStone=null, shuffStart=null, dragCur=null, dragHistory=[];
 
 function dark(){ return window.matchMedia('(prefers-color-scheme:dark)').matches; }
 window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change', ()=>{ terrainCacheFrame = -1; });
@@ -439,6 +442,7 @@ C.addEventListener('pointerdown', e=>{
   if (!s) return;
   if (G.phase==='goal' && s.id===G.lastTouched){ setMsg('Pick a DIFFERENT stone!'); return; }
   shuffStone = s; shuffStart = {x:sx, y:sy}; dragCur = {x:sx, y:sy};
+  dragHistory = [{t: performance.now(), x: sx, y: sy}];
 });
 
 C.addEventListener('pointermove', e=>{
@@ -446,6 +450,9 @@ C.addEventListener('pointermove', e=>{
   e.preventDefault();
   const r = C.getBoundingClientRect();
   dragCur = {x:(e.clientX-r.left)*(W/r.width), y:(e.clientY-r.top)*(H/r.height)};
+  const now = performance.now();
+  dragHistory.push({t: now, x: dragCur.x, y: dragCur.y});
+  while (dragHistory.length > 1 && now - dragHistory[0].t > VELOCITY_WINDOW_MS) dragHistory.shift();
   draw();
 });
 
@@ -497,13 +504,22 @@ C.addEventListener('pointerup', e=>{
   if (!shuffStone || !shuffStart) return;
   const r = C.getBoundingClientRect();
   const sx=(e.clientX-r.left)*(W/r.width), sy=(e.clientY-r.top)*(H/r.height);
-  const dx=sx-shuffStart.x, dy=sy-shuffStart.y, len=Math.hypot(dx,dy);
-  if (len > 5){
+  const now = performance.now();
+  dragHistory.push({t: now, x: sx, y: sy});
+  while (dragHistory.length > 1 && now - dragHistory[0].t > VELOCITY_WINDOW_MS) dragHistory.shift();
+
+  const windowStart = dragHistory[0];
+  const dx = sx - windowStart.x, dy = sy - windowStart.y;
+  const dt = Math.max(1, now - windowStart.t);
+  const dist = Math.hypot(dx, dy);
+  const velocity = dist / dt;
+
+  if (velocity > MIN_RELEASE_VELOCITY && dist > 4){
     const mult = G.phase==='cascade' ? CASCADE_POWER_MULT : 1;
-    const power = Math.min(len*0.12, MAX_POWER) * mult * difficultyPowerMult();
-    fireStone(shuffStone, (dx/len)*power, (dy/len)*power);
+    const power = Math.min(velocity * VELOCITY_TO_POWER, MAX_POWER) * mult * difficultyPowerMult();
+    fireStone(shuffStone, (dx/dist)*power, (dy/dist)*power);
   }
-  shuffStone=null; shuffStart=null; dragCur=null;
+  shuffStone=null; shuffStart=null; dragCur=null; dragHistory=[];
 });
 
 let terrainCacheCanvas = null, terrainCacheCtx = null, terrainCacheFrame = -1;
@@ -633,11 +649,16 @@ function draw(){
     ctx.restore();
   }
 
-  if (shuffStone && shuffStart && dragCur){
-    const dx = dragCur.x-shuffStart.x, dy = dragCur.y-shuffStart.y, len = Math.hypot(dx,dy);
-    if (len > 4){
-      const pw = Math.min(len*0.12, MAX_POWER);
-      const nx = dx/len, ny = dy/len;
+  if (shuffStone && shuffStart && dragCur && dragHistory.length > 1){
+    const now = performance.now();
+    const windowStart = dragHistory[0];
+    const dx = dragCur.x - windowStart.x, dy = dragCur.y - windowStart.y;
+    const dt = Math.max(1, now - windowStart.t);
+    const dist = Math.hypot(dx, dy);
+    const velocity = dist / dt;
+    if (velocity > MIN_RELEASE_VELOCITY && dist > 4){
+      const pw = Math.min(velocity * VELOCITY_TO_POWER, MAX_POWER);
+      const nx = dx/dist, ny = dy/dist;
       const sx = wx2sx(shuffStone.wx), sy = wy2sy(shuffStone.wy);
       ctx.save();
       ctx.strokeStyle = dark() ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.45)';
