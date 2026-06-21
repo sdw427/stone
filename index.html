@@ -349,7 +349,7 @@ function difficultyRadiusMult(){
   return Math.max(MIN_RADIUS_MULT, 1 - (turn-1) * DIFFICULTY_RAMP_PER_TURN);
 }
 
-const MAX_VISUAL_GROWTH = 0.22;
+const MAX_VISUAL_GROWTH = 5;
 
 function visualStoneGrowth(){
   const rm = difficultyRadiusMult();
