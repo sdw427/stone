@@ -23,13 +23,18 @@ button{font-size:13px;padding:7px 14px;border:0.5px solid #bbb;border-radius:8px
 #overlay h2{font-size:20px;font-weight:600;color:#1c1c1e;}
 #overlay .big{font-size:36px;font-weight:600;color:#1c1c1e;margin:4px 0;}
 #overlay .sub{font-size:13px;color:#888;}
+#rescue-overlay{position:absolute;inset:0;background:rgba(240,237,232,0.96);display:none;flex-direction:column;align-items:center;justify-content:center;gap:6px;text-align:center;padding:20px;}
+#rescue-overlay.show{display:flex;}
+#rescue-overlay h2{font-size:20px;font-weight:600;color:#1c1c1e;}
+#rescue-overlay .sub{font-size:13px;color:#888;}
 @media(prefers-color-scheme:dark){
   body{background:#1c1c1e;}
   #canvas-wrap{background:#262628;}
-  .stat-val,#overlay h2,#overlay .big{color:#fff;}
-  .stat-lbl,#msg-row,#overlay .sub{color:#999;}
+  .stat-val,#overlay h2,#overlay .big,#rescue-overlay h2{color:#fff;}
+  .stat-lbl,#msg-row,#overlay .sub,#rescue-overlay .sub{color:#999;}
   button{color:#aaa;border-color:#444;}
   #overlay{background:rgba(28,28,30,0.96);}
+  #rescue-overlay{background:rgba(28,28,30,0.96);}
 }
 </style>
 </head>
@@ -49,6 +54,14 @@ button{font-size:13px;padding:7px 14px;border:0.5px solid #bbb;border-radius:8px
       <div class="sub" id="ov-sub">Best: 0</div>
       <button id="ov-btn" onclick="restartGame()" style="margin-top:8px;">Play again</button>
     </div>
+    <div id="rescue-overlay">
+      <h2>Missed!</h2>
+      <div class="sub" id="rescue-sub">Sacrifice points to keep going?</div>
+      <div style="display:flex;gap:10px;margin-top:10px;">
+        <button id="rescue-accept" onclick="acceptRescue()" style="border-color:#2FA8C9;color:#2FA8C9;">Continue (-<span id="rescue-cost">1</span>)</button>
+        <button id="rescue-decline" onclick="declineRescue()">End game</button>
+      </div>
+    </div>
   </div>
 
   <div id="msg-row">Tap one stone and swipe to break the triangle</div>
@@ -63,10 +76,10 @@ const SR = 18;
 const BASE_FRICTION = 0.955;
 const ICE_FRICTION = 0.97;
 const GRAVEL_FRICTION = 0.935;
-const MAX_POWER =22;
+const MAX_POWER = 17;
 const CASCADE_POWER_MULT = 1.0;
 const VELOCITY_WINDOW_MS = 110;
-const VELOCITY_TO_POWER = 1.5;
+const VELOCITY_TO_POWER = 7.49;
 const MIN_RELEASE_VELOCITY = 0.06;
 const BASE_ZOOM = 1;
 const MIN_ZOOM = 0.35;
@@ -217,10 +230,13 @@ function initGame(){
     terrainAnchor: { x: 0, y: 0 },
     terrain: makeTerrain(Date.now() & 0x7fffffff, 0, 0),
     buoy: null,
+    rescuesUsed: 0,
+    pendingMissShotId: null,
   };
   shuffStone=null; shuffStart=null; dragCur=null;
   terrainCacheFrame = -1;
   document.getElementById('overlay').classList.remove('show');
+  document.getElementById('rescue-overlay').classList.remove('show');
   updateHUD();
   setMsg('Tap one stone and swipe to break the triangle');
 }
@@ -349,6 +365,13 @@ function stonePassedThrough(shot, gp1, gp2){
   return Math.hypot(shot.wx-mx, shot.wy-my) < scoreRadius;
 }
 
+function rescueCost(useNumber){
+  if (useNumber === 1) return 1;
+  if (useNumber === 2) return 5;
+  if (useNumber === 3) return 10;
+  return Math.round(10 * Math.pow(1.5, useNumber - 3));
+}
+
 function endGame(reason){
   G.gameOver = true;
   const best = getBest();
@@ -359,6 +382,35 @@ function endGame(reason){
   document.getElementById('ov-sub').textContent = 'Best: ' + (isNew ? G.score : best);
   document.getElementById('overlay').classList.add('show');
   updateHUD();
+}
+
+function showRescuePrompt(cost){
+  document.getElementById('rescue-sub').textContent = `Sacrifice ${cost} point${cost===1?'':'s'} to keep going?`;
+  document.getElementById('rescue-cost').textContent = cost;
+  document.getElementById('rescue-overlay').classList.add('show');
+}
+
+function acceptRescue(){
+  const cost = rescueCost(G.rescuesUsed + 1);
+  G.score = Math.max(0, G.score - cost);
+  G.rescuesUsed++;
+  document.getElementById('rescue-overlay').classList.remove('show');
+  G.difficultyTurn++;
+  G.lastTouched = G.pendingMissShotId;
+  G.pendingMissShotId = null;
+  G.turn++;
+  G.phase = 'goal';
+  setMsg(`Sacrificed ${cost} point${cost===1?'':'s'} — keep going`);
+  maybeSpawnBuoy();
+  updateHUD();
+  draw();
+}
+
+function declineRescue(){
+  document.getElementById('rescue-overlay').classList.remove('show');
+  G.pendingMissShotId = null;
+  endGame('miss');
+  draw();
 }
 
 function runAnimation(phase, shotId){
@@ -389,6 +441,13 @@ function runAnimation(phase, shotId){
       draw();
     } else {
       if (!scored){
+        const nextCost = rescueCost(G.rescuesUsed + 1);
+        if (G.score >= nextCost){
+          G.pendingMissShotId = shotId;
+          showRescuePrompt(nextCost);
+          draw();
+          return;
+        }
         endGame('miss');
         draw();
         return;
@@ -419,6 +478,7 @@ function fireStone(stone, vx, vy){
 
 C.addEventListener('pointerdown', e=>{
   e.preventDefault();
+  if (G.pendingMissShotId !== null) return;
   const r = C.getBoundingClientRect();
   const sx=(e.clientX-r.left)*(W/r.width), sy=(e.clientY-r.top)*(H/r.height);
 
