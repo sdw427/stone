@@ -61,8 +61,8 @@ const ctx = C.getContext('2d');
 const W = 370, H = 400;
 const SR = 18;
 const BASE_FRICTION = 0.945;
-const ICE_FRICTION = 0.985;
-const GRAVEL_FRICTION = 0.885;
+const ICE_FRICTION = 0.96;
+const GRAVEL_FRICTION = 0.925;
 const MAX_POWER = 11;
 const CASCADE_POWER_MULT = 1.0;
 const BASE_ZOOM = 1;
@@ -77,6 +77,11 @@ const MIN_POWER_MULT = 0.7;
 const POWER_RAMP_PER_TURN = 0.02;
 const TERRAIN_GROWTH_PER_TURN = 0.05;
 const MAX_TERRAIN_INTENSITY_MULT = 1.8;
+const BUOY_ELIGIBLE_TURN = 8;
+const BUOY_SPAWN_CHANCE = 0.35;
+const BUOY_MIN_DIST_FACTOR = 0.4;
+const BUOY_MAX_DIST_FACTOR = 0.8;
+const BUOY_HIT_RADIUS = 26;
 
 let G = {};
 let shuffStone=null, shuffStart=null, dragCur=null;
@@ -115,7 +120,7 @@ function makeTerrain(seedVal){
 }
 
 function terrainIntensityMult(){
-  const turn = (G && G.turn) ? G.turn : 1;
+  const turn = (G && G.difficultyTurn) ? G.difficultyTurn : 1;
   return Math.min(MAX_TERRAIN_INTENSITY_MULT, 1 + (turn-1) * TERRAIN_GROWTH_PER_TURN);
 }
 
@@ -159,7 +164,7 @@ function terrainColor(t){
     ];
   } else {
     const lightR = 232, lightG = 228, lightB = 220;
-    const gravR = 130, gravG = 128, gravB = 120;
+    const gravR = 215, gravG = 140, gravB = 60;
     const k = -clamp;
     return [
       Math.round(lightR + (gravR-lightR)*k),
@@ -178,7 +183,7 @@ function terrainColorDark(t){
     return [Math.round(baseR+(iceR-baseR)*k), Math.round(baseG+(iceG-baseG)*k), Math.round(baseB+(iceB-baseB)*k)];
   } else {
     const baseR=38, baseG=38, baseB=40;
-    const gravR=20, gravG=20, gravB=18;
+    const gravR=95, gravG=55, gravB=15;
     const k = -clamp;
     return [Math.round(baseR+(gravR-baseR)*k), Math.round(baseG+(gravG-baseG)*k), Math.round(baseB+(gravB-baseB)*k)];
   }
@@ -196,12 +201,14 @@ function initGame(){
     phase: 'cascade',
     score: 0,
     turn: 1,
+    difficultyTurn: 1,
     lastTouched: null,
     animating: false,
     particles: [],
     floatTexts: [],
     gameOver: false,
     terrain: makeTerrain(Date.now() & 0x7fffffff),
+    buoy: null,
   };
   shuffStone=null; shuffStart=null; dragCur=null;
   document.getElementById('overlay').classList.remove('show');
@@ -306,7 +313,7 @@ function spawnFloatText(wx,wy,text,col){
 }
 
 function difficultyRadiusMult(){
-  const turn = G.turn || 1;
+  const turn = G.difficultyTurn || 1;
   return Math.max(MIN_RADIUS_MULT, 1 - (turn-1) * DIFFICULTY_RAMP_PER_TURN);
 }
 
@@ -339,19 +346,24 @@ function endGame(reason){
 function runAnimation(phase, shotId){
   G.animating = true;
   const goalStones = phase==='goal' ? G.stones.filter(s=>s.id!==shotId) : null;
-  let scored=false, ticks=0;
+  let scored=false, buoyHit=false, ticks=0;
   function tick(){
     updateCamera();
     const moving = stepPhysics();
-    if (phase==='goal' && !scored){
+    if (phase==='goal'){
       const s = G.stones.find(s=>s.id===shotId);
-      if (stonePassedThrough(s, goalStones[0], goalStones[1])){
+      if (!scored && stonePassedThrough(s, goalStones[0], goalStones[1])){
         scored = true;
         G.score++;
         spawnParticles(s.wx, s.wy, '#7F77DD');
         spawnFloatText(s.wx, s.wy-30, '+1', '#534AB7');
-        setMsg('Scored! Getting tighter…');
         updateHUD();
+      }
+      if (!buoyHit && stoneHitBuoy(s)){
+        buoyHit = true;
+        spawnParticles(s.wx, s.wy, '#2FA8C9');
+        spawnFloatText(s.wx, s.wy-30, 'Reset!', '#177A94');
+        G.buoy = null;
       }
     }
     draw();
@@ -363,15 +375,22 @@ function runAnimation(phase, shotId){
       setMsg('Pick a stone — each lights up its own goal line');
       draw();
     } else {
-      if (!scored){
+      if (!scored && !buoyHit){
         endGame('miss');
         draw();
         return;
       }
-      setMsg('Pick a stone, then shoot through its goal line');
+      if (buoyHit){
+        G.difficultyTurn = 1;
+        setMsg(scored ? 'Scored + reset! Goals are wide open again' : 'Buoy hit — safe, goals reset');
+      } else {
+        G.difficultyTurn++;
+        setMsg('Scored! Getting tighter…');
+      }
       G.lastTouched = shotId;
       G.turn++;
       G.phase = 'goal';
+      maybeSpawnBuoy();
       updateHUD();
       draw();
     }
@@ -410,8 +429,24 @@ C.addEventListener('pointermove', e=>{
 });
 
 function difficultyPowerMult(){
-  const turn = G.turn || 1;
+  const turn = G.difficultyTurn || 1;
   return Math.max(MIN_POWER_MULT, 1 - (turn-1) * POWER_RAMP_PER_TURN);
+}
+
+function maybeSpawnBuoy(){
+  if (G.buoy) return;
+  if (G.difficultyTurn < BUOY_ELIGIBLE_TURN) return;
+  if (Math.random() > BUOY_SPAWN_CHANCE) return;
+  const c = centroid();
+  const maxR = maxRadiusFromCentroid(c) + SR;
+  const dist = maxR * (BUOY_MIN_DIST_FACTOR + Math.random()*(BUOY_MAX_DIST_FACTOR-BUOY_MIN_DIST_FACTOR)) + 60;
+  const ang = Math.random()*Math.PI*2;
+  G.buoy = { wx: c.x + Math.cos(ang)*dist, wy: c.y + Math.sin(ang)*dist };
+}
+
+function stoneHitBuoy(stone){
+  if (!G.buoy) return false;
+  return Math.hypot(stone.wx-G.buoy.wx, stone.wy-G.buoy.wy) < BUOY_HIT_RADIUS;
 }
 
 C.addEventListener('pointerup', e=>{
@@ -472,6 +507,22 @@ function draw(){
       ctx.stroke();
       ctx.restore();
     }
+  }
+
+  if (G.buoy){
+    const bx = wx2sx(G.buoy.wx), by = wy2sy(G.buoy.wy);
+    const pulse = 1 + Math.sin(Date.now()/280) * 0.12;
+    const br = BUOY_HIT_RADIUS * G.cam.zoom * pulse;
+    ctx.save();
+    ctx.fillStyle = 'rgba(47,168,201,0.18)';
+    ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#2FA8C9';
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(bx, by, br*0.6, 0, Math.PI*2); ctx.stroke();
+    ctx.fillStyle = '#2FA8C9';
+    ctx.beginPath(); ctx.arc(bx, by, 4, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
   }
 
   for (const p of G.particles){
