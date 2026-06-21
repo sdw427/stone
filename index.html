@@ -279,7 +279,7 @@ function updateCamera(){
     terrainCacheFrame = -1;
   }
 
-  const maxR = maxRadiusFromCentroid(c) + SR;
+  const maxR = maxRadiusFromCentroid(c) + effectiveStoneRadius();
   const fitHalf = Math.min(W, H) / 2 - 20;
   let targetZoom = maxR > 1 ? Math.min(BASE_ZOOM, fitHalf / maxR) : BASE_ZOOM;
   targetZoom = Math.max(targetZoom, MIN_ZOOM * 0.4);
@@ -292,7 +292,7 @@ function updateCamera(){
 
 function stoneAt(sx, sy){
   let best = null, bestDist = Infinity;
-  const maxR = (SR*G.cam.zoom) + 14;
+  const maxR = (effectiveStoneRadius()*G.cam.zoom) + 14;
   for (const s of G.stones){
     const dx = wx2sx(s.wx)-sx, dy = wy2sy(s.wy)-sy;
     const d = Math.hypot(dx,dy);
@@ -303,8 +303,9 @@ function stoneAt(sx, sy){
 
 function resolveCollision(a,b){
   const dx=b.wx-a.wx, dy=b.wy-a.wy, dist=Math.hypot(dx,dy);
-  if (dist < SR*2 && dist > 0.01){
-    const nx=dx/dist, ny=dy/dist, ov=SR*2-dist;
+  const er = effectiveStoneRadius();
+  if (dist < er*2 && dist > 0.01){
+    const nx=dx/dist, ny=dy/dist, ov=er*2-dist;
     a.wx-=nx*ov/2; a.wy-=ny*ov/2;
     b.wx+=nx*ov/2; b.wy+=ny*ov/2;
     const rv=a.vx-b.vx, ru=a.vy-b.vy, dot=rv*nx+ru*ny;
@@ -352,7 +353,7 @@ function growthFrac(){
   const turn = G.difficultyTurn || 1;
   const rm = Math.max(MIN_RADIUS_MULT, 1 - (turn-1) * DIFFICULTY_RAMP_PER_TURN);
   const t = (1 - rm) / (1 - MIN_RADIUS_MULT);
-  return Math.sqrt(t) * MAX_GROWTH_FRAC;
+  return t * MAX_GROWTH_FRAC;
 }
 
 function effectiveStoneRadius(){
@@ -540,7 +541,7 @@ function maybeSpawnBuoy(){
   if (G.difficultyTurn < BUOY_ELIGIBLE_TURN) return;
   if (Math.random() > BUOY_SPAWN_CHANCE) return;
   const c = centroid();
-  const maxR = maxRadiusFromCentroid(c) + SR;
+  const maxR = maxRadiusFromCentroid(c) + effectiveStoneRadius();
   const dist = maxR * (BUOY_MIN_DIST_FACTOR + Math.random()*(BUOY_MAX_DIST_FACTOR-BUOY_MIN_DIST_FACTOR)) + 60;
   const ang = Math.random()*Math.PI*2;
   const type = Math.random() < 0.5 ? 'reset' : 'freeze';
