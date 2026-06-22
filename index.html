@@ -10,6 +10,9 @@ html,body{touch-action:none;overflow:hidden;}
 body{background:#f0ede8;display:flex;justify-content:center;padding:16px;}
 #wrap{width:370px;display:flex;flex-direction:column;gap:0;user-select:none;}
 #hud{display:flex;justify-content:space-between;align-items:center;padding:8px 4px 6px;}
+#buoy-status{display:none;align-items:center;gap:6px;font-size:12px;color:#777;padding:0 4px 8px;}
+#buoy-status.show{display:flex;}
+#buoy-status .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
 .stat{display:flex;flex-direction:column;align-items:flex-start;}
 .stat-val{font-size:22px;font-weight:600;color:#1c1c1e;line-height:1;}
 .stat-lbl{font-size:11px;color:#888;margin-top:2px;}
@@ -31,7 +34,7 @@ button{font-size:13px;padding:7px 14px;border:0.5px solid #bbb;border-radius:8px
   body{background:#1c1c1e;}
   #canvas-wrap{background:#262628;}
   .stat-val,#overlay h2,#overlay .big,#rescue-overlay h2{color:#fff;}
-  .stat-lbl,#msg-row,#overlay .sub,#rescue-overlay .sub{color:#999;}
+  .stat-lbl,#msg-row,#overlay .sub,#rescue-overlay .sub,#buoy-status{color:#999;}
   button{color:#aaa;border-color:#444;}
   #overlay{background:rgba(28,28,30,0.96);}
   #rescue-overlay{background:rgba(28,28,30,0.96);}
@@ -45,6 +48,7 @@ button{font-size:13px;padding:7px 14px;border:0.5px solid #bbb;border-radius:8px
     <div class="stat" style="align-items:center;"><span class="stat-val" id="h-turn">1</span><span class="stat-lbl">turn</span></div>
     <div class="stat" style="align-items:flex-end;"><span class="stat-val" id="h-best">0</span><span class="stat-lbl">best</span></div>
   </div>
+  <div id="buoy-status"></div>
 
   <div id="canvas-wrap">
     <canvas id="c" width="370" height="400"></canvas>
@@ -102,6 +106,21 @@ const BUOY_BASE_RADIUS = 26;
 const BUOY_TAP_PADDING = 14;
 const BUOY_LIFESPAN_MS = 4000;
 const FREEZE_DURATION_TURNS = 5;
+const DOUBLESCORE_DURATION_TURNS = 5;
+const STABILIZER_DURATION_TURNS = 6;
+const STABILIZER_RATE_MULT = 0.5;
+const GATE_BUILDER_PUSH = 6;
+
+const BUOY_COLORS = {
+  reset: '#2FA8C9', freeze: '#3DBE7A', shrink: '#B97FE0',
+  doublescore: '#E0B82F', stabilizer: '#5B8FD9', gatebuilder: '#E08F3D',
+  rescuecredit: '#D9527A',
+};
+const BUOY_LABELS = {
+  reset: 'Reset', freeze: 'Freeze', shrink: 'Shrink',
+  doublescore: 'Double Score', stabilizer: 'Stabilizer', gatebuilder: 'Gate Builder',
+  rescuecredit: 'Rescue Credit',
+};
 
 let G = {};
 let shuffStone=null, shuffStart=null, dragCur=null, dragHistory=[];
@@ -233,12 +252,16 @@ function initGame(){
     buoy: null,
     rescuesUsed: 0,
     freezeTurnsRemaining: 0,
+    doubleScoreTurnsRemaining: 0,
+    stabilizerTurnsRemaining: 0,
+    rescueCredits: 0,
     pendingMissShotId: null,
   };
   shuffStone=null; shuffStart=null; dragCur=null;
   terrainCacheFrame = -1;
   document.getElementById('overlay').classList.remove('show');
   document.getElementById('rescue-overlay').classList.remove('show');
+  document.getElementById('buoy-status').classList.remove('show');
   updateHUD();
   setMsg('Tap one stone and swipe to break the triangle');
 }
@@ -250,6 +273,14 @@ function updateHUD(){
 }
 
 function setMsg(t){ document.getElementById('msg-row').textContent = t; }
+
+function showBuoyStatus(type){
+  const el = document.getElementById('buoy-status');
+  const col = BUOY_COLORS[type] || BUOY_COLORS.reset;
+  const label = BUOY_LABELS[type] || 'Buoy';
+  el.innerHTML = `<span class="dot" style="background:${col}"></span>Last buoy: ${label}`;
+  el.classList.add('show');
+}
 
 function centroid(){
   return {
@@ -427,10 +458,11 @@ function runAnimation(phase, shotId){
       const s = G.stones.find(s=>s.id===shotId);
       if (stonePassedThrough(s, goalStones[0], goalStones[1])){
         scored = true;
-        G.score++;
+        const gain = G.doubleScoreTurnsRemaining > 0 ? 2 : 1;
+        G.score += gain;
         spawnParticles(s.wx, s.wy, '#7F77DD');
-        spawnFloatText(s.wx, s.wy-30, '+1', '#534AB7');
-        setMsg('Scored! Getting tighter…');
+        spawnFloatText(s.wx, s.wy-30, gain > 1 ? '+2!' : '+1', '#534AB7');
+        setMsg(gain > 1 ? 'Double score!' : 'Scored! Getting tighter…');
         updateHUD();
       }
     }
@@ -444,6 +476,17 @@ function runAnimation(phase, shotId){
       draw();
     } else {
       if (!scored){
+        if (G.rescueCredits > 0){
+          G.rescueCredits--;
+          G.lastTouched = shotId;
+          G.turn++;
+          G.phase = 'goal';
+          setMsg('Free rescue credit used — keep going');
+          maybeSpawnBuoy();
+          updateHUD();
+          draw();
+          return;
+        }
         const nextCost = rescueCost(G.rescuesUsed + 1);
         if (G.score >= nextCost){
           G.pendingMissShotId = shotId;
@@ -457,9 +500,13 @@ function runAnimation(phase, shotId){
       }
       if (G.freezeTurnsRemaining > 0){
         G.freezeTurnsRemaining--;
+      } else if (G.stabilizerTurnsRemaining > 0){
+        G.stabilizerTurnsRemaining--;
+        G.difficultyTurn += STABILIZER_RATE_MULT;
       } else {
         G.difficultyTurn++;
       }
+      if (G.doubleScoreTurnsRemaining > 0) G.doubleScoreTurnsRemaining--;
       G.lastTouched = shotId;
       G.turn++;
       G.phase = 'goal';
@@ -496,17 +543,55 @@ C.addEventListener('pointerdown', e=>{
       const buoyWx = G.buoy.wx, buoyWy = G.buoy.wy;
       const buoyType = G.buoy.type;
       G.buoy = null;
-      if (buoyType === 'freeze'){
-        G.freezeTurnsRemaining = FREEZE_DURATION_TURNS;
-        spawnParticles(buoyWx, buoyWy, '#3DBE7A');
-        spawnFloatText(buoyWx, buoyWy-12, 'Frozen!', '#2A9460');
-        setMsg(`Growth paused for ${FREEZE_DURATION_TURNS} turns`);
-      } else {
-        G.difficultyTurn = 1;
-        spawnParticles(buoyWx, buoyWy, '#2FA8C9');
-        spawnFloatText(buoyWx, buoyWy-12, 'Reset!', '#177A94');
-        setMsg('Goals reset — wide open again');
+      switch (buoyType){
+        case 'freeze':
+          G.freezeTurnsRemaining = FREEZE_DURATION_TURNS;
+          spawnParticles(buoyWx, buoyWy, '#3DBE7A');
+          spawnFloatText(buoyWx, buoyWy-12, 'Frozen!', '#2A9460');
+          setMsg(`Growth paused for ${FREEZE_DURATION_TURNS} turns`);
+          break;
+        case 'shrink':
+          G.difficultyTurn = Math.max(1, Math.round((G.difficultyTurn + 1) / 2));
+          spawnParticles(buoyWx, buoyWy, '#B97FE0');
+          spawnFloatText(buoyWx, buoyWy-12, 'Shrunk!', '#8B4FC4');
+          setMsg('Stones shrunk back partway');
+          break;
+        case 'doublescore':
+          G.doubleScoreTurnsRemaining = DOUBLESCORE_DURATION_TURNS;
+          spawnParticles(buoyWx, buoyWy, '#E0B82F');
+          spawnFloatText(buoyWx, buoyWy-12, '2x Score!', '#B8941A');
+          setMsg(`Double points for ${DOUBLESCORE_DURATION_TURNS} turns`);
+          break;
+        case 'stabilizer':
+          G.stabilizerTurnsRemaining = STABILIZER_DURATION_TURNS;
+          spawnParticles(buoyWx, buoyWy, '#5B8FD9');
+          spawnFloatText(buoyWx, buoyWy-12, 'Stabilized', '#3E6BB0');
+          setMsg(`Growth slowed for ${STABILIZER_DURATION_TURNS} turns`);
+          break;
+        case 'gatebuilder': {
+          const c = centroid();
+          for (const st of G.stones){
+            const dx = st.wx-c.x, dy = st.wy-c.y, d = Math.hypot(dx,dy);
+            if (d > 0.01){ st.wx += (dx/d)*GATE_BUILDER_PUSH; st.wy += (dy/d)*GATE_BUILDER_PUSH; }
+          }
+          spawnParticles(buoyWx, buoyWy, '#E08F3D');
+          spawnFloatText(buoyWx, buoyWy-12, 'Gates widened', '#B86B1F');
+          setMsg('Gaps widened a little');
+          break;
+        }
+        case 'rescuecredit':
+          G.rescueCredits++;
+          spawnParticles(buoyWx, buoyWy, '#D9527A');
+          spawnFloatText(buoyWx, buoyWy-12, 'Credit banked', '#B23A5E');
+          setMsg('Free rescue banked for later');
+          break;
+        default:
+          G.difficultyTurn = 1;
+          spawnParticles(buoyWx, buoyWy, '#2FA8C9');
+          spawnFloatText(buoyWx, buoyWy-12, 'Reset!', '#177A94');
+          setMsg('Goals reset — wide open again');
       }
+      showBuoyStatus(buoyType);
       draw();
       return;
     }
@@ -536,6 +621,8 @@ function difficultyPowerMult(){
   return Math.max(MIN_POWER_MULT, 1 - (turn-1) * POWER_RAMP_PER_TURN);
 }
 
+const BUOY_TYPES = ['reset', 'freeze', 'shrink', 'doublescore', 'stabilizer', 'gatebuilder', 'rescuecredit'];
+
 function maybeSpawnBuoy(){
   if (G.buoy) return;
   if (G.difficultyTurn < BUOY_ELIGIBLE_TURN) return;
@@ -544,7 +631,7 @@ function maybeSpawnBuoy(){
   const maxR = maxRadiusFromCentroid(c) + effectiveStoneRadius();
   const dist = maxR * (BUOY_MIN_DIST_FACTOR + Math.random()*(BUOY_MAX_DIST_FACTOR-BUOY_MIN_DIST_FACTOR)) + 60;
   const ang = Math.random()*Math.PI*2;
-  const type = Math.random() < 0.5 ? 'reset' : 'freeze';
+  const type = BUOY_TYPES[Math.floor(Math.random()*BUOY_TYPES.length)];
   G.buoy = { wx: c.x + Math.cos(ang)*dist, wy: c.y + Math.sin(ang)*dist, spawnedAt: Date.now(), type };
   ensureIdleLoop();
 }
@@ -666,10 +753,9 @@ function draw(){
     const pulse = 1 + Math.sin(Date.now()/pulseSpeed) * (urgency ? 0.18 : 0.1);
     const sizeFrac = 0.25 + lifeFrac*0.75;
     const br = BUOY_BASE_RADIUS * G.cam.zoom * sizeFrac * pulse;
-    const isFreeze = G.buoy.type === 'freeze';
-    const col = isFreeze ? '#3DBE7A' : '#2FA8C9';
-    const colFill = isFreeze ? 'rgba(61,190,122,0.18)' : 'rgba(47,168,201,0.18)';
-    const colFaint = isFreeze ? 'rgba(61,190,122,0.35)' : 'rgba(47,168,201,0.35)';
+    const col = BUOY_COLORS[G.buoy.type] || BUOY_COLORS.reset;
+    const colFill = col + '2E';
+    const colFaint = col + '59';
     ctx.save();
     ctx.globalAlpha = 0.55 + lifeFrac*0.45;
     ctx.fillStyle = colFill;
