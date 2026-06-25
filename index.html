@@ -6,18 +6,14 @@
 <title>Stone Cascade</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,sans-serif;}
-html,body{touch-action:none;overflow:hidden;}
 body{background:#f0ede8;display:flex;justify-content:center;padding:16px;}
 #wrap{width:370px;display:flex;flex-direction:column;gap:0;user-select:none;}
 #hud{display:flex;justify-content:space-between;align-items:center;padding:8px 4px 6px;}
-#buoy-status{display:none;align-items:center;gap:6px;font-size:12px;color:#777;padding:0 4px 8px;}
-#buoy-status.show{display:flex;}
-#buoy-status .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
 .stat{display:flex;flex-direction:column;align-items:flex-start;}
 .stat-val{font-size:22px;font-weight:600;color:#1c1c1e;line-height:1;}
 .stat-lbl{font-size:11px;color:#888;margin-top:2px;}
 #canvas-wrap{position:relative;width:370px;height:400px;border-radius:10px;overflow:hidden;background:#e8e4dc;}
-canvas{display:block;touch-action:none;}
+canvas{display:block;}
 #msg-row{font-size:13px;color:#666;text-align:center;min-height:18px;padding:8px 0 6px;}
 button{font-size:13px;padding:7px 14px;border:0.5px solid #bbb;border-radius:8px;background:transparent;color:#555;cursor:pointer;}
 #new-btn{display:block;margin:0 auto;}
@@ -26,18 +22,13 @@ button{font-size:13px;padding:7px 14px;border:0.5px solid #bbb;border-radius:8px
 #overlay h2{font-size:20px;font-weight:600;color:#1c1c1e;}
 #overlay .big{font-size:36px;font-weight:600;color:#1c1c1e;margin:4px 0;}
 #overlay .sub{font-size:13px;color:#888;}
-#rescue-overlay{position:absolute;inset:0;background:rgba(240,237,232,0.96);display:none;flex-direction:column;align-items:center;justify-content:center;gap:6px;text-align:center;padding:20px;}
-#rescue-overlay.show{display:flex;}
-#rescue-overlay h2{font-size:20px;font-weight:600;color:#1c1c1e;}
-#rescue-overlay .sub{font-size:13px;color:#888;}
 @media(prefers-color-scheme:dark){
   body{background:#1c1c1e;}
   #canvas-wrap{background:#262628;}
-  .stat-val,#overlay h2,#overlay .big,#rescue-overlay h2{color:#fff;}
-  .stat-lbl,#msg-row,#overlay .sub,#rescue-overlay .sub,#buoy-status{color:#999;}
+  .stat-val,#overlay h2,#overlay .big{color:#fff;}
+  .stat-lbl,#msg-row,#overlay .sub{color:#999;}
   button{color:#aaa;border-color:#444;}
   #overlay{background:rgba(28,28,30,0.96);}
-  #rescue-overlay{background:rgba(28,28,30,0.96);}
 }
 </style>
 </head>
@@ -48,7 +39,6 @@ button{font-size:13px;padding:7px 14px;border:0.5px solid #bbb;border-radius:8px
     <div class="stat" style="align-items:center;"><span class="stat-val" id="h-turn">1</span><span class="stat-lbl">turn</span></div>
     <div class="stat" style="align-items:flex-end;"><span class="stat-val" id="h-best">0</span><span class="stat-lbl">best</span></div>
   </div>
-  <div id="buoy-status"></div>
 
   <div id="canvas-wrap">
     <canvas id="c" width="370" height="400"></canvas>
@@ -57,14 +47,6 @@ button{font-size:13px;padding:7px 14px;border:0.5px solid #bbb;border-radius:8px
       <div class="big" id="ov-score">0</div>
       <div class="sub" id="ov-sub">Best: 0</div>
       <button id="ov-btn" onclick="restartGame()" style="margin-top:8px;">Play again</button>
-    </div>
-    <div id="rescue-overlay">
-      <h2>Missed!</h2>
-      <div class="sub" id="rescue-sub">Sacrifice points to keep going?</div>
-      <div style="display:flex;gap:10px;margin-top:10px;">
-        <button id="rescue-accept" onclick="acceptRescue()" style="border-color:#2FA8C9;color:#2FA8C9;">Continue (-<span id="rescue-cost">1</span>)</button>
-        <button id="rescue-decline" onclick="declineRescue()">End game</button>
-      </div>
     </div>
   </div>
 
@@ -77,56 +59,58 @@ const C = document.getElementById('c');
 const ctx = C.getContext('2d');
 const W = 370, H = 400;
 const SR = 18;
-const BASE_FRICTION = 0.955;
-const ICE_FRICTION = 0.97;
-const GRAVEL_FRICTION = 0.935;
-const MAX_POWER = 17;
-const CASCADE_POWER_MULT = 1.0;
-const VELOCITY_WINDOW_MS = 110;
-const VELOCITY_TO_POWER = 7.49;
-const MIN_RELEASE_VELOCITY = 0.06;
+const GROWTH_START_TURN = 2;   // turn 1 (the break) stays at base size
+const GROWTH_CAP_TURN = 16;    // 15 turns after the break, growth plateaus
+const GROWTH_MAX_MULT = 1.8;   // +80% size at cap, per spec
+function effectiveStoneRadius(){
+  const turn = G.turn;
+  if (turn <= GROWTH_START_TURN) return SR;
+  const span = GROWTH_CAP_TURN - GROWTH_START_TURN;
+  const progress = Math.min(1, (turn - GROWTH_START_TURN) / span);
+  return SR * (1 + (GROWTH_MAX_MULT - 1) * progress);
+}
+const BASE_FRICTION = 0.978;
+const ICE_FRICTION = 0.988;
+const GRAVEL_FRICTION = 0.945;
+const MAX_POWER = 11;
+const MIN_SWIPE_VEL = 0.27; // px/ms — at or below this, shot is at minimum power. Tune to taste.
+const MAX_SWIPE_VEL = 2.27; // px/ms — at or above this, shot is at MAX_POWER. Tune to taste.
+const VEL_WINDOW_MS = 80;   // how far back we look to judge "current" finger speed, so a slow drag finished by a fast flick reads as fast
+const CASCADE_POWER_MULT = 1.4;
 const BASE_ZOOM = 1;
 const MIN_ZOOM = 0.35;
 const VIEW_MARGIN = 70;
 const TERRAIN_SCALE = 220;
-const TERRAIN_SEED_COUNT = 80;
-const TERRAIN_MAX_DIST = 650;
-const TERRAIN_REANCHOR_DIST = 320;
-const DIFFICULTY_RAMP_PER_TURN = 0.0321;
-const MIN_RADIUS_MULT = 0.55;
-const MIN_POWER_MULT = 0.7;
-const POWER_RAMP_PER_TURN = 0.02;
-const TERRAIN_GROWTH_PER_TURN = 0.05;
-const MAX_TERRAIN_INTENSITY_MULT = 1.8;
-const BUOY_ELIGIBLE_TURN = 6;
-const BUOY_SPAWN_CHANCE = 0.35;
-const BUOY_MIN_DIST_FACTOR = 0.4;
-const BUOY_MAX_DIST_FACTOR = 0.8;
-const BUOY_BASE_RADIUS = 26;
-const BUOY_TAP_PADDING = 14;
-const BUOY_LIFESPAN_MS = 4000;
-const FREEZE_DURATION_TURNS = 5;
-const DOUBLESCORE_DURATION_TURNS = 5;
-const STABILIZER_DURATION_TURNS = 6;
-const STABILIZER_RATE_MULT = 0.5;
-const GATE_BUILDER_PUSH = 6;
-
-const BUOY_COLORS = {
-  reset: '#2FA8C9', freeze: '#3DBE7A', shrink: '#B97FE0',
-  doublescore: '#E0B82F', stabilizer: '#5B8FD9', gatebuilder: '#E08F3D',
-  rescuecredit: '#D9527A',
-};
-const BUOY_LABELS = {
-  reset: 'Reset', freeze: 'Freeze', shrink: 'Shrink',
-  doublescore: 'Double Score', stabilizer: 'Stabilizer', gatebuilder: 'Gate Builder',
-  rescuecredit: 'Rescue Credit',
-};
+const TERRAIN_SEED_COUNT = 60;
+const STEP_MS = 1000/60; // fixed timestep per spec section 5.1/9 — simulation must not depend on display refresh rate
+const MAX_STEPS_PER_FRAME = 8; // clamp to avoid spiral-of-death if a frame stalls (tab backgrounded, etc.)
 
 let G = {};
-let shuffStone=null, shuffStart=null, dragCur=null, dragHistory=[];
+let shuffStone=null, shuffStart=null, dragCur=null, dragHist=[];
+
+function pushDragPoint(x, y){
+  const t = performance.now();
+  dragHist.push({x, y, t});
+  while (dragHist.length > 1 && t - dragHist[0].t > VEL_WINDOW_MS) dragHist.shift();
+}
+
+function recentSwipeVelocity(){
+  // px/ms over the recent window only, so a slow drag ending in a fast flick reads as fast, not averaged down
+  if (dragHist.length < 2) return 0;
+  const first = dragHist[0], last = dragHist[dragHist.length-1];
+  const dt = last.t - first.t;
+  if (dt < 1) return 0;
+  const dist = Math.hypot(last.x-first.x, last.y-first.y);
+  return dist / dt;
+}
+
+function velocityToPower(vel){
+  const clamped = Math.max(MIN_SWIPE_VEL, Math.min(MAX_SWIPE_VEL, vel));
+  const t = (clamped - MIN_SWIPE_VEL) / (MAX_SWIPE_VEL - MIN_SWIPE_VEL);
+  return t * MAX_POWER;
+}
 
 function dark(){ return window.matchMedia('(prefers-color-scheme:dark)').matches; }
-window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change', ()=>{ terrainCacheFrame = -1; });
 
 const STONE_COLS = [
   { base:'#7F77DD', hi:'#AFA9EC' },
@@ -141,27 +125,22 @@ function setBest(v){
   try { localStorage.setItem('stoneCascadeBest', String(v)); } catch(e){}
 }
 
-function makeTerrain(seedVal, centerX, centerY){
+function makeTerrain(seedVal){
   let s = seedVal;
   function rand(){ s = (s*1103515245+12345) & 0x7fffffff; return s/0x7fffffff; }
   const seeds = [];
   const SAFE_R = 130;
   for (let i=0;i<TERRAIN_SEED_COUNT;i++){
     const ang = rand()*Math.PI*2;
-    const dist = SAFE_R + rand()*rand()*TERRAIN_MAX_DIST;
+    const dist = SAFE_R + rand()*rand()*2200;
     seeds.push({
-      wx: centerX + Math.cos(ang)*dist,
-      wy: centerY + Math.sin(ang)*dist,
-      r: 45 + rand()*75,
+      wx: Math.cos(ang)*dist,
+      wy: Math.sin(ang)*dist,
+      r: 60 + rand()*140,
       val: rand()*2 - 1,
     });
   }
   return seeds;
-}
-
-function terrainIntensityMult(){
-  const turn = (G && G.difficultyTurn) ? G.difficultyTurn : 1;
-  return Math.min(MAX_TERRAIN_INTENSITY_MULT, 1 + (turn-1) * TERRAIN_GROWTH_PER_TURN);
 }
 
 function terrainValueAt(wx, wy){
@@ -173,13 +152,12 @@ function terrainValueAt(wx, wy){
     weightSum += w;
   }
   let raw = weightSum < 0.01 ? 0 : total;
-  raw *= terrainIntensityMult();
   raw = Math.max(-1, Math.min(1, raw));
-  const distFromAnchor = Math.hypot(wx-G.terrainAnchor.x, wy-G.terrainAnchor.y);
+  const distFromOrigin = Math.hypot(wx, wy);
   const SAFE_R = 130, FADE_R = 230;
-  if (distFromAnchor < SAFE_R) return 0;
-  if (distFromAnchor < FADE_R){
-    const k = (distFromAnchor - SAFE_R) / (FADE_R - SAFE_R);
+  if (distFromOrigin < SAFE_R) return 0;
+  if (distFromOrigin < FADE_R){
+    const k = (distFromOrigin - SAFE_R) / (FADE_R - SAFE_R);
     return raw * k;
   }
   return raw;
@@ -204,7 +182,7 @@ function terrainColor(t){
     ];
   } else {
     const lightR = 232, lightG = 228, lightB = 220;
-    const gravR = 215, gravG = 140, gravB = 60;
+    const gravR = 130, gravG = 128, gravB = 120;
     const k = -clamp;
     return [
       Math.round(lightR + (gravR-lightR)*k),
@@ -223,7 +201,7 @@ function terrainColorDark(t){
     return [Math.round(baseR+(iceR-baseR)*k), Math.round(baseG+(iceG-baseG)*k), Math.round(baseB+(iceB-baseB)*k)];
   } else {
     const baseR=38, baseG=38, baseB=40;
-    const gravR=95, gravG=55, gravB=15;
+    const gravR=20, gravG=20, gravB=18;
     const k = -clamp;
     return [Math.round(baseR+(gravR-baseR)*k), Math.round(baseG+(gravG-baseG)*k), Math.round(baseB+(gravB-baseB)*k)];
   }
@@ -241,27 +219,15 @@ function initGame(){
     phase: 'cascade',
     score: 0,
     turn: 1,
-    difficultyTurn: 1,
     lastTouched: null,
     animating: false,
     particles: [],
     floatTexts: [],
     gameOver: false,
-    terrainAnchor: { x: 0, y: 0 },
-    terrain: makeTerrain(Date.now() & 0x7fffffff, 0, 0),
-    buoy: null,
-    rescuesUsed: 0,
-    freezeTurnsRemaining: 0,
-    doubleScoreTurnsRemaining: 0,
-    stabilizerTurnsRemaining: 0,
-    rescueCredits: 0,
-    pendingMissShotId: null,
+    terrain: makeTerrain(Date.now() & 0x7fffffff),
   };
-  shuffStone=null; shuffStart=null; dragCur=null;
-  terrainCacheFrame = -1;
+  shuffStone=null; shuffStart=null; dragCur=null; dragHist=[];
   document.getElementById('overlay').classList.remove('show');
-  document.getElementById('rescue-overlay').classList.remove('show');
-  document.getElementById('buoy-status').classList.remove('show');
   updateHUD();
   setMsg('Tap one stone and swipe to break the triangle');
 }
@@ -273,14 +239,6 @@ function updateHUD(){
 }
 
 function setMsg(t){ document.getElementById('msg-row').textContent = t; }
-
-function showBuoyStatus(type){
-  const el = document.getElementById('buoy-status');
-  const col = BUOY_COLORS[type] || BUOY_COLORS.reset;
-  const label = BUOY_LABELS[type] || 'Buoy';
-  el.innerHTML = `<span class="dot" style="background:${col}"></span>Last buoy: ${label}`;
-  el.classList.add('show');
-}
 
 function centroid(){
   return {
@@ -302,13 +260,6 @@ function updateCamera(){
   const c = centroid();
   G.cam.x += (c.x - G.cam.x) * 0.08;
   G.cam.y += (c.y - G.cam.y) * 0.08;
-
-  const anchorDist = Math.hypot(c.x-G.terrainAnchor.x, c.y-G.terrainAnchor.y);
-  if (anchorDist > TERRAIN_REANCHOR_DIST){
-    G.terrainAnchor = { x: c.x, y: c.y };
-    G.terrain = makeTerrain(Date.now() & 0x7fffffff, c.x, c.y);
-    terrainCacheFrame = -1;
-  }
 
   const maxR = maxRadiusFromCentroid(c) + effectiveStoneRadius();
   const fitHalf = Math.min(W, H) / 2 - 20;
@@ -334,9 +285,9 @@ function stoneAt(sx, sy){
 
 function resolveCollision(a,b){
   const dx=b.wx-a.wx, dy=b.wy-a.wy, dist=Math.hypot(dx,dy);
-  const er = effectiveStoneRadius();
-  if (dist < er*2 && dist > 0.01){
-    const nx=dx/dist, ny=dy/dist, ov=er*2-dist;
+  const r2 = effectiveStoneRadius()*2;
+  if (dist < r2 && dist > 0.01){
+    const nx=dx/dist, ny=dy/dist, ov=r2-dist;
     a.wx-=nx*ov/2; a.wy-=ny*ov/2;
     b.wx+=nx*ov/2; b.wy+=ny*ov/2;
     const rv=a.vx-b.vx, ru=a.vy-b.vy, dot=rv*nx+ru*ny;
@@ -346,14 +297,13 @@ function resolveCollision(a,b){
 
 function stepPhysics(){
   let moving=false;
-  const STOP_THRESH = 0.2;
   for (const s of G.stones){
     const f = frictionAtSigned(s.wx, s.wy);
     s.vx *= f; s.vy *= f;
-    if (Math.abs(s.vx) < STOP_THRESH) s.vx = 0;
-    if (Math.abs(s.vy) < STOP_THRESH) s.vy = 0;
+    if (Math.abs(s.vx) < 0.03) s.vx = 0;
+    if (Math.abs(s.vy) < 0.03) s.vy = 0;
     s.wx += s.vx; s.wy += s.vy;
-    if (Math.abs(s.vx) > STOP_THRESH || Math.abs(s.vy) > STOP_THRESH) moving = true;
+    if (Math.abs(s.vx) > 0.03 || Math.abs(s.vy) > 0.03) moving = true;
   }
   for (let i=0;i<G.stones.length;i++)
     for (let j=i+1;j<G.stones.length;j++)
@@ -378,33 +328,13 @@ function spawnFloatText(wx,wy,text,col){
   G.floatTexts.push({x:wx2sx(wx), y:wy2sy(wy), text, col, life:1});
 }
 
-const MAX_GROWTH_FRAC = 0.8;
-
-function growthFrac(){
-  const turn = G.difficultyTurn || 1;
-  const rm = Math.max(MIN_RADIUS_MULT, 1 - (turn-1) * DIFFICULTY_RAMP_PER_TURN);
-  const t = (1 - rm) / (1 - MIN_RADIUS_MULT);
-  return t * MAX_GROWTH_FRAC;
-}
-
-function effectiveStoneRadius(){
-  return SR * (1 + growthFrac());
-}
-
 function stonePassedThrough(shot, gp1, gp2){
-  const er = effectiveStoneRadius();
   const mx=(gp1.wx+gp2.wx)/2, my=(gp1.wy+gp2.wy)/2;
   const fullGap = Math.hypot(gp1.wx-gp2.wx, gp1.wy-gp2.wy);
-  const postOpening = Math.max(fullGap - er*2, er*0.6);
-  const scoreRadius = Math.min(postOpening/2, fullGap/2 - er*0.5);
+  const r = effectiveStoneRadius();
+  const postOpening = Math.max(fullGap - r*2, r*0.6);
+  const scoreRadius = Math.min(postOpening/2, fullGap/2 - r*0.5);
   return Math.hypot(shot.wx-mx, shot.wy-my) < scoreRadius;
-}
-
-function rescueCost(useNumber){
-  if (useNumber === 1) return 1;
-  if (useNumber === 2) return 5;
-  if (useNumber === 3) return 10;
-  return Math.round(10 * Math.pow(1.5, useNumber - 3));
 }
 
 function endGame(reason){
@@ -419,98 +349,59 @@ function endGame(reason){
   updateHUD();
 }
 
-function showRescuePrompt(cost){
-  document.getElementById('rescue-sub').textContent = `Sacrifice ${cost} point${cost===1?'':'s'} to keep going?`;
-  document.getElementById('rescue-cost').textContent = cost;
-  document.getElementById('rescue-overlay').classList.add('show');
-}
-
-function acceptRescue(){
-  const cost = rescueCost(G.rescuesUsed + 1);
-  G.score = Math.max(0, G.score - cost);
-  G.rescuesUsed++;
-  document.getElementById('rescue-overlay').classList.remove('show');
-  G.lastTouched = G.pendingMissShotId;
-  G.pendingMissShotId = null;
-  G.turn++;
-  G.phase = 'goal';
-  setMsg(`Sacrificed ${cost} point${cost===1?'':'s'} — keep going`);
-  maybeSpawnBuoy();
-  updateHUD();
-  draw();
-}
-
-function declineRescue(){
-  document.getElementById('rescue-overlay').classList.remove('show');
-  G.pendingMissShotId = null;
-  endGame('miss');
-  draw();
-}
-
 function runAnimation(phase, shotId){
   G.animating = true;
   const goalStones = phase==='goal' ? G.stones.filter(s=>s.id!==shotId) : null;
-  let scored=false, ticks=0;
-  function tick(){
-    updateCamera();
-    const moving = stepPhysics();
-    if (phase==='goal' && !scored){
-      const s = G.stones.find(s=>s.id===shotId);
-      if (stonePassedThrough(s, goalStones[0], goalStones[1])){
-        scored = true;
-        const gain = G.doubleScoreTurnsRemaining > 0 ? 2 : 1;
-        G.score += gain;
-        spawnParticles(s.wx, s.wy, '#7F77DD');
-        spawnFloatText(s.wx, s.wy-30, gain > 1 ? '+2!' : '+1', '#534AB7');
-        setMsg(gain > 1 ? 'Double score!' : 'Scored! Getting tighter…');
-        updateHUD();
+  let scored=false, simSteps=0;
+  const MAX_SIM_STEPS = 500; // same total-step ceiling as before, now counted in fixed sim steps rather than frames
+  let lastTime = null;
+  let accumulator = 0;
+  let stillMoving = true; // assume moving until a step says otherwise; avoids stopping on a frame with zero steps
+
+  function tick(now){
+    if (lastTime === null) lastTime = now;
+    let frameMs = now - lastTime;
+    lastTime = now;
+    if (frameMs > 250) frameMs = 250; // clamp huge gaps (tab backgrounded) instead of dumping them into the sim
+    accumulator += frameMs;
+
+    let stepsThisFrame = 0;
+    while (accumulator >= STEP_MS && simSteps < MAX_SIM_STEPS && stepsThisFrame < MAX_STEPS_PER_FRAME){
+      updateCamera();
+      stillMoving = stepPhysics();
+      if (phase==='goal' && !scored){
+        const s = G.stones.find(s=>s.id===shotId);
+        if (stonePassedThrough(s, goalStones[0], goalStones[1])){
+          scored = true;
+          G.score++;
+          spawnParticles(s.wx, s.wy, '#7F77DD');
+          spawnFloatText(s.wx, s.wy-30, '+1', '#534AB7');
+          setMsg('Scored!');
+          updateHUD();
+        }
       }
+      accumulator -= STEP_MS;
+      simSteps++;
+      stepsThisFrame++;
     }
+
     draw();
-    ticks++;
-    if (moving && ticks < 500){ requestAnimationFrame(tick); return; }
+    if (stillMoving && simSteps < MAX_SIM_STEPS){ requestAnimationFrame(tick); return; }
     G.animating = false;
     if (phase==='cascade'){
       G.phase = 'goal';
-      setMsg('Pick a stone — each lights up its own goal line');
+      setMsg('Flick a DIFFERENT stone through the goal posts');
       draw();
     } else {
       if (!scored){
-        if (G.rescueCredits > 0){
-          G.rescueCredits--;
-          G.lastTouched = shotId;
-          G.turn++;
-          G.phase = 'goal';
-          setMsg('Free rescue credit used — keep going');
-          maybeSpawnBuoy();
-          updateHUD();
-          draw();
-          return;
-        }
-        const nextCost = rescueCost(G.rescuesUsed + 1);
-        if (G.score >= nextCost){
-          G.pendingMissShotId = shotId;
-          showRescuePrompt(nextCost);
-          draw();
-          return;
-        }
         endGame('miss');
         draw();
         return;
       }
-      if (G.freezeTurnsRemaining > 0){
-        G.freezeTurnsRemaining--;
-      } else if (G.stabilizerTurnsRemaining > 0){
-        G.stabilizerTurnsRemaining--;
-        G.difficultyTurn += STABILIZER_RATE_MULT;
-      } else {
-        G.difficultyTurn++;
-      }
-      if (G.doubleScoreTurnsRemaining > 0) G.doubleScoreTurnsRemaining--;
+      setMsg('Push a different stone through the next goal');
       G.lastTouched = shotId;
       G.turn++;
       G.phase = 'goal';
-      maybeSpawnBuoy();
       updateHUD();
       draw();
     }
@@ -531,183 +422,51 @@ function fireStone(stone, vx, vy){
 }
 
 C.addEventListener('pointerdown', e=>{
-  e.preventDefault();
-  if (G.pendingMissShotId !== null) return;
+  if (G.animating || G.gameOver) return;
   const r = C.getBoundingClientRect();
   const sx=(e.clientX-r.left)*(W/r.width), sy=(e.clientY-r.top)*(H/r.height);
-
-  if (G.buoy){
-    const bx = wx2sx(G.buoy.wx), by = wy2sy(G.buoy.wy);
-    const tapR = Math.max(BUOY_BASE_RADIUS * G.cam.zoom, 24) + BUOY_TAP_PADDING;
-    if (Math.hypot(sx-bx, sy-by) < tapR){
-      const buoyWx = G.buoy.wx, buoyWy = G.buoy.wy;
-      const buoyType = G.buoy.type;
-      G.buoy = null;
-      switch (buoyType){
-        case 'freeze':
-          G.freezeTurnsRemaining = FREEZE_DURATION_TURNS;
-          spawnParticles(buoyWx, buoyWy, '#3DBE7A');
-          spawnFloatText(buoyWx, buoyWy-12, 'Frozen!', '#2A9460');
-          setMsg(`Growth paused for ${FREEZE_DURATION_TURNS} turns`);
-          break;
-        case 'shrink':
-          G.difficultyTurn = Math.max(1, Math.round((G.difficultyTurn + 1) / 2));
-          spawnParticles(buoyWx, buoyWy, '#B97FE0');
-          spawnFloatText(buoyWx, buoyWy-12, 'Shrunk!', '#8B4FC4');
-          setMsg('Stones shrunk back partway');
-          break;
-        case 'doublescore':
-          G.doubleScoreTurnsRemaining = DOUBLESCORE_DURATION_TURNS;
-          spawnParticles(buoyWx, buoyWy, '#E0B82F');
-          spawnFloatText(buoyWx, buoyWy-12, '2x Score!', '#B8941A');
-          setMsg(`Double points for ${DOUBLESCORE_DURATION_TURNS} turns`);
-          break;
-        case 'stabilizer':
-          G.stabilizerTurnsRemaining = STABILIZER_DURATION_TURNS;
-          spawnParticles(buoyWx, buoyWy, '#5B8FD9');
-          spawnFloatText(buoyWx, buoyWy-12, 'Stabilized', '#3E6BB0');
-          setMsg(`Growth slowed for ${STABILIZER_DURATION_TURNS} turns`);
-          break;
-        case 'gatebuilder': {
-          const c = centroid();
-          for (const st of G.stones){
-            const dx = st.wx-c.x, dy = st.wy-c.y, d = Math.hypot(dx,dy);
-            if (d > 0.01){ st.wx += (dx/d)*GATE_BUILDER_PUSH; st.wy += (dy/d)*GATE_BUILDER_PUSH; }
-          }
-          spawnParticles(buoyWx, buoyWy, '#E08F3D');
-          spawnFloatText(buoyWx, buoyWy-12, 'Gates widened', '#B86B1F');
-          setMsg('Gaps widened a little');
-          break;
-        }
-        case 'rescuecredit':
-          G.rescueCredits++;
-          spawnParticles(buoyWx, buoyWy, '#D9527A');
-          spawnFloatText(buoyWx, buoyWy-12, 'Credit banked', '#B23A5E');
-          setMsg('Free rescue banked for later');
-          break;
-        default:
-          G.difficultyTurn = 1;
-          spawnParticles(buoyWx, buoyWy, '#2FA8C9');
-          spawnFloatText(buoyWx, buoyWy-12, 'Reset!', '#177A94');
-          setMsg('Goals reset — wide open again');
-      }
-      showBuoyStatus(buoyType);
-      draw();
-      return;
-    }
-  }
-
-  if (G.animating || G.gameOver) return;
   const s = stoneAt(sx, sy);
   if (!s) return;
   if (G.phase==='goal' && s.id===G.lastTouched){ setMsg('Pick a DIFFERENT stone!'); return; }
   shuffStone = s; shuffStart = {x:sx, y:sy}; dragCur = {x:sx, y:sy};
-  dragHistory = [{t: performance.now(), x: sx, y: sy}];
+  dragHist = [];
+  pushDragPoint(sx, sy);
 });
 
 C.addEventListener('pointermove', e=>{
   if (!shuffStone) return;
-  e.preventDefault();
   const r = C.getBoundingClientRect();
   dragCur = {x:(e.clientX-r.left)*(W/r.width), y:(e.clientY-r.top)*(H/r.height)};
-  const now = performance.now();
-  dragHistory.push({t: now, x: dragCur.x, y: dragCur.y});
-  while (dragHistory.length > 1 && now - dragHistory[0].t > VELOCITY_WINDOW_MS) dragHistory.shift();
+  pushDragPoint(dragCur.x, dragCur.y);
   draw();
 });
-
-function difficultyPowerMult(){
-  const turn = G.difficultyTurn || 1;
-  return Math.max(MIN_POWER_MULT, 1 - (turn-1) * POWER_RAMP_PER_TURN);
-}
-
-const BUOY_TYPES = ['reset', 'freeze', 'shrink', 'doublescore', 'stabilizer', 'gatebuilder', 'rescuecredit'];
-
-function maybeSpawnBuoy(){
-  if (G.buoy) return;
-  if (G.difficultyTurn < BUOY_ELIGIBLE_TURN) return;
-  if (Math.random() > BUOY_SPAWN_CHANCE) return;
-  const c = centroid();
-  const maxR = maxRadiusFromCentroid(c) + effectiveStoneRadius();
-  const dist = maxR * (BUOY_MIN_DIST_FACTOR + Math.random()*(BUOY_MAX_DIST_FACTOR-BUOY_MIN_DIST_FACTOR)) + 60;
-  const ang = Math.random()*Math.PI*2;
-  const type = BUOY_TYPES[Math.floor(Math.random()*BUOY_TYPES.length)];
-  G.buoy = { wx: c.x + Math.cos(ang)*dist, wy: c.y + Math.sin(ang)*dist, spawnedAt: Date.now(), type };
-  ensureIdleLoop();
-}
-
-function buoyLifeFrac(){
-  if (!G.buoy) return 0;
-  const elapsed = Date.now() - G.buoy.spawnedAt;
-  return Math.max(0, 1 - elapsed / BUOY_LIFESPAN_MS);
-}
-
-let idleLoopRunning = false;
-function ensureIdleLoop(){
-  if (idleLoopRunning) return;
-  idleLoopRunning = true;
-  function idleTick(){
-    if (G.buoy && !G.animating){
-      if (buoyLifeFrac() <= 0){
-        G.buoy = null;
-      } else {
-        draw();
-      }
-    }
-    if (G.buoy){
-      requestAnimationFrame(idleTick);
-    } else {
-      idleLoopRunning = false;
-    }
-  }
-  requestAnimationFrame(idleTick);
-}
 
 C.addEventListener('pointerup', e=>{
   if (!shuffStone || !shuffStart) return;
   const r = C.getBoundingClientRect();
   const sx=(e.clientX-r.left)*(W/r.width), sy=(e.clientY-r.top)*(H/r.height);
-  const now = performance.now();
-  dragHistory.push({t: now, x: sx, y: sy});
-  while (dragHistory.length > 1 && now - dragHistory[0].t > VELOCITY_WINDOW_MS) dragHistory.shift();
-
-  const windowStart = dragHistory[0];
-  const dx = sx - windowStart.x, dy = sy - windowStart.y;
-  const dt = Math.max(1, now - windowStart.t);
-  const dist = Math.hypot(dx, dy);
-  const velocity = dist / dt;
-
-  if (velocity > MIN_RELEASE_VELOCITY && dist > 4){
+  pushDragPoint(sx, sy);
+  const dx=sx-shuffStart.x, dy=sy-shuffStart.y, len=Math.hypot(dx,dy);
+  const vel = recentSwipeVelocity();
+  if (len > 5 && vel > 0){
     const mult = G.phase==='cascade' ? CASCADE_POWER_MULT : 1;
-    const power = Math.min(velocity * VELOCITY_TO_POWER, MAX_POWER) * mult * difficultyPowerMult();
-    fireStone(shuffStone, (dx/dist)*power, (dy/dist)*power);
+    const power = velocityToPower(vel) * mult;
+    fireStone(shuffStone, (dx/len)*power, (dy/len)*power);
   }
-  shuffStone=null; shuffStart=null; dragCur=null; dragHistory=[];
+  shuffStone=null; shuffStart=null; dragCur=null; dragHist=[];
 });
 
-let terrainCacheCanvas = null, terrainCacheCtx = null, terrainCacheFrame = -1;
-let frameCounter = 0;
-
 function drawTerrain(){
-  if (!terrainCacheCanvas){
-    terrainCacheCanvas = document.createElement('canvas');
-    terrainCacheCanvas.width = W; terrainCacheCanvas.height = H;
-    terrainCacheCtx = terrainCacheCanvas.getContext('2d');
-  }
-  if (frameCounter - terrainCacheFrame >= 3 || terrainCacheFrame === -1){
-    const cell = 28;
-    for (let sx=0; sx<W; sx+=cell){
-      for (let sy=0; sy<H; sy+=cell){
-        const wx = sx2wx(sx+cell/2), wy = sy2wy(sy+cell/2);
-        const t = terrainValueAt(wx, wy);
-        const rgb = dark() ? terrainColorDark(t) : terrainColor(t);
-        terrainCacheCtx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
-        terrainCacheCtx.fillRect(sx, sy, cell+1, cell+1);
-      }
+  const cell = 14;
+  for (let sx=0; sx<W; sx+=cell){
+    for (let sy=0; sy<H; sy+=cell){
+      const wx = sx2wx(sx+cell/2), wy = sy2wy(sy+cell/2);
+      const t = terrainValueAt(wx, wy);
+      const rgb = dark() ? terrainColorDark(t) : terrainColor(t);
+      ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+      ctx.fillRect(sx, sy, cell+1, cell+1);
     }
-    terrainCacheFrame = frameCounter;
   }
-  ctx.drawImage(terrainCacheCanvas, 0, 0);
 }
 
 function drawGrid(){
@@ -721,57 +480,23 @@ function drawGrid(){
 }
 
 function draw(){
-  frameCounter++;
   ctx.clearRect(0,0,W,H);
   drawTerrain();
   drawGrid();
 
   if (G.phase==='goal'){
-    const candidates = G.stones.filter(s => s.id !== G.lastTouched);
-    for (const shootStone of candidates){
-      const gp = G.stones.filter(s => s.id !== shootStone.id);
-      const isActive = shuffStone && shuffStone.id === shootStone.id;
+    const gp = G.stones.filter(s=>s.id!==G.lastTouched);
+    if (gp.length===2){
       ctx.save();
       ctx.setLineDash([5,5]);
-      ctx.strokeStyle = isActive
-        ? (dark() ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.4)')
-        : (dark() ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.12)');
-      ctx.lineWidth = isActive ? 2 : 1.5;
+      ctx.strokeStyle = dark() ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.15)';
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(wx2sx(gp[0].wx), wy2sy(gp[0].wy));
       ctx.lineTo(wx2sx(gp[1].wx), wy2sy(gp[1].wy));
       ctx.stroke();
       ctx.restore();
     }
-  }
-
-  if (G.buoy){
-    const bx = wx2sx(G.buoy.wx), by = wy2sy(G.buoy.wy);
-    const lifeFrac = buoyLifeFrac();
-    const urgency = lifeFrac < 0.3;
-    const pulseSpeed = urgency ? 90 : 280;
-    const pulse = 1 + Math.sin(Date.now()/pulseSpeed) * (urgency ? 0.18 : 0.1);
-    const sizeFrac = 0.25 + lifeFrac*0.75;
-    const br = BUOY_BASE_RADIUS * G.cam.zoom * sizeFrac * pulse;
-    const col = BUOY_COLORS[G.buoy.type] || BUOY_COLORS.reset;
-    const colFill = col + '2E';
-    const colFaint = col + '59';
-    ctx.save();
-    ctx.globalAlpha = 0.55 + lifeFrac*0.45;
-    ctx.fillStyle = colFill;
-    ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI*2); ctx.fill();
-    ctx.strokeStyle = col;
-    ctx.lineWidth = 2.5;
-    ctx.setLineDash([]);
-    ctx.beginPath(); ctx.arc(bx, by, br*0.6, 0, Math.PI*2); ctx.stroke();
-    ctx.strokeStyle = colFaint;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.arc(bx, by, BUOY_BASE_RADIUS*G.cam.zoom + 6, -Math.PI/2, -Math.PI/2 + lifeFrac*Math.PI*2);
-    ctx.stroke();
-    ctx.fillStyle = col;
-    ctx.beginPath(); ctx.arc(bx, by, 4, 0, Math.PI*2); ctx.fill();
-    ctx.restore();
   }
 
   for (const p of G.particles){
@@ -815,16 +540,11 @@ function draw(){
     ctx.restore();
   }
 
-  if (shuffStone && shuffStart && dragCur && dragHistory.length > 1){
-    const now = performance.now();
-    const windowStart = dragHistory[0];
-    const dx = dragCur.x - windowStart.x, dy = dragCur.y - windowStart.y;
-    const dt = Math.max(1, now - windowStart.t);
-    const dist = Math.hypot(dx, dy);
-    const velocity = dist / dt;
-    if (velocity > MIN_RELEASE_VELOCITY && dist > 4){
-      const pw = Math.min(velocity * VELOCITY_TO_POWER, MAX_POWER);
-      const nx = dx/dist, ny = dy/dist;
+  if (shuffStone && shuffStart && dragCur){
+    const dx = dragCur.x-shuffStart.x, dy = dragCur.y-shuffStart.y, len = Math.hypot(dx,dy);
+    if (len > 4){
+      const pw = velocityToPower(recentSwipeVelocity());
+      const nx = dx/len, ny = dy/len;
       const sx = wx2sx(shuffStone.wx), sy = wy2sy(shuffStone.wy);
       ctx.save();
       ctx.strokeStyle = dark() ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.45)';
